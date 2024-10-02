@@ -317,7 +317,8 @@ def read_timeline(path):
         train_json = json.load(json_file)
     with open(os.path.join(path, "transforms_val.json")) as json_file:
         test_json = json.load(json_file)  
-    time_line = [frame["img_id"] for frame in train_json["frames"]] + [frame["img_id"] for frame in test_json["frames"]]
+    # time_line = [frame["img_id"] for frame in train_json["frames"]] + [frame["img_id"] for frame in test_json["frames"]]
+    time_line = [frame["timestep_index"] for frame in train_json["frames"]] + [frame["timestep_index"] for frame in test_json["frames"]]
     time_line = set(time_line)
     time_line = list(time_line)
     time_line.sort()

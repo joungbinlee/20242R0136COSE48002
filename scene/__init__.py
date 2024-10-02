@@ -47,8 +47,8 @@ class Scene:
         self.test_cameras = {}
         self.video_cameras = {}
 
-        scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](args.source_path, False, args.eval, custom_aud=custom_aud)
-        dataset_type = "ER-NeRF"
+        scene_info = sceneLoadTypeCallbacks2[args.dataset_type](args.source_path, False, args.eval, custom_aud=custom_aud)
+        dataset_type = args.dataset_type
         
         self.maxtime = scene_info.maxtime
         self.dataset_type = dataset_type

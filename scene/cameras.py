@@ -13,6 +13,24 @@ import torch
 from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
+from decalib.common import batch_rot_matrix_to_ht, batch_orth_proj_matrix
+from decalib.utils.rotation_converter import batch_rodrigues
+
+import sys
+import pdb
+
+class ForkedPdb(pdb.Pdb):
+    """
+    PDB Subclass for debugging multi-processed code
+    Suggested in: https://stackoverflow.com/questions/4716533/how-to-attach-debugger-to-a-python-subproccess
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, gt_image, head_mask, bg_image,
@@ -47,19 +65,39 @@ class Camera(nn.Module):
         self.zfar = 100.0
         self.znear = 0.01
 
+        # self.trans = torch.tensor([trans[1],trans[2],0])
+        # self.scale = trans[0]
+        
         self.trans = trans
         self.scale = scale
-
+        # ForkedPdb().set_trace()
         self.face_rect = face_rect
         self.lhalf_rect = lhalf_rect
         self.eye_rect = eye_rect
         self.lips_rect = lips_rect
-
-        self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1)
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)
+        
+        self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1)  #.cuda()
+        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)  #.cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+        
+        # self.world_view_transform = torch.tensor(getWorld2View2(R, T, np.array([0.0, 0.0, 0.0]), 1.0)).transpose(0, 1)
+        # # self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale.0)).transpose(0, 1)
+        # self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)
+        # self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
+        # self.camera_center = self.world_view_transform.inverse()[3, :3]
 
+        # # ht_canonical2world = batch_rot_matrix_to_ht(torch.from_numpy(R).unsqueeze(dim=0)).transpose(1, 2)
+        # ht_canonical2world = torch.tensor(getWorld2View2(R, np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0]), 1.0)).transpose(0, 1)
+        # # ht_canonical2world[1,:] = -ht_canonical2world[1,:]
+        # # ht_canonical2world = torch.tensor(getWorld2View2(R, T, np.array([0,0,0]), trans[0])).transpose(0, 1)
+        # # ht_canonical2world = torch.eye(4)
+        # ht_world2camera = batch_orth_proj_matrix(torch.from_numpy(trans).unsqueeze(dim=0))
+        # world_mat = torch.matmul(ht_world2camera, ht_canonical2world)
+        # self.world_view_transform = ht_canonical2world
+        # self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
+        # self.camera_center = self.world_view_transform.inverse()[3, :3]
+        
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform, time):
         self.image_width = width

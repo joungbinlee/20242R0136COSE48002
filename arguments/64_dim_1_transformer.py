@@ -24,6 +24,7 @@ ModelHiddenParams = dict(
     ffn_hidden=128,
     n_layer=1,
     train_tri_plane=True, 
+    dataset_type='deca',
 )
 OptimizationParams = dict(
     dataloader=True,

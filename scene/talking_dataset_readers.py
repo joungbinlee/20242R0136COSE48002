@@ -13,6 +13,8 @@ import os
 import sys
 from PIL import Image
 from scene.cameras import Camera
+import scipy.io
+import pickle
 
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
@@ -30,7 +32,15 @@ from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 from utils.general_utils import PILtoTorch
 from tqdm import tqdm
-from scene.utils import get_audio_features
+from scene.utils import get_audio_features, load_shape_from_obj
+from decalib.utils.tensor_cropper import transform_points
+from decalib.utils.rotation_converter import batch_rodrigues
+from decalib.common import batch_rot_matrix_to_ht, batch_orth_proj_matrix
+
+try:
+    from pytorch3d.io import load_obj
+except ImportError:
+    from utils.pytorch3d_load_obj import load_obj
 
 import cv2
 
@@ -205,6 +215,7 @@ def euler2rot(euler_angle):
 
 def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features, eye_features, 
                                     extension=".jpg", mapper = {}, preload=False, custom_aud =None):
+    
     cam_infos = []
     mesh_path = os.path.join(path, meshfile)
     track_params = torch.load(mesh_path)
@@ -233,7 +244,7 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
         bg_img = cv2.resize(bg_img, (contents["w"], contents["h"]), interpolation=cv2.INTER_AREA)
     bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
     bg_img = torch.from_numpy(bg_img).permute(2,0,1).float() / 255.0
-        
+    
     if custom_aud:
         auds = aud_features
     else:    
@@ -340,6 +351,265 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
 
 
 
+
+def readCamerasFromTracksTransforms_deca(path, meshfile, transformsfile, aud_features, eye_features, 
+                                    extension=".png", mapper = {}, preload=False, custom_aud =None):
+    cam_infos = []
+    
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+    
+    if 'camera_angle_x' in contents:
+        fovx_shared = contents["camera_angle_x"]
+
+    frames = contents["frames"]
+    if custom_aud:
+        auds = aud_features
+    else:    
+        auds = [aud_features[min(frame['timestep_index'], aud_features.shape[0] - 1)] for frame in frames]
+        auds = torch.stack(auds, dim=0)    
+        
+    bg_image_path = os.path.join(path, "bc.jpg")
+    bg_img = cv2.imread(bg_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 3]
+    if bg_img.shape[0] != contents["h"] or bg_img.shape[1] != contents["w"]:
+        bg_img = cv2.resize(bg_img, (contents["w"], contents["h"]), interpolation=cv2.INTER_AREA)
+    bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+    bg_img = torch.from_numpy(bg_img).permute(2,0,1).float() / 255.0
+    
+    for idx, frame in tqdm(enumerate(frames), total=len(frames)):
+        aud_feature = get_audio_features(auds, att_mode = 2, index = idx)     
+        
+        file_path = frame["file_path"]
+        # if extension not in frame["file_path"]:
+        #     file_path += extension
+        cam_name = os.path.join(path, file_path)
+        # NeRF 'transform_matrix' is a camera-to-world transform
+        c2w = np.array(frame["transform_matrix"])
+        # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+        c2w[:3, 1:3] *= -1
+
+        # get the world-to-camera transform and set R, T
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+        T = w2c[:3, 3]
+
+        image_path = os.path.join(path, cam_name)
+        image_name = Path(cam_name).stem
+        
+        if 'w' in frame and 'h' in frame:
+            image = None
+            width = frame['w']
+            height = frame['h']
+        else:
+            image = Image.open(image_path)
+            im_data = np.array(image.convert("RGBA"))
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg_img * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            width, height = image.size
+
+        if 'camera_angle_x' in frame:
+            fovx = frame["camera_angle_x"]
+        else:
+            fovx = fovx_shared
+        fovy = focal2fov(fov2focal(fovx, width), height)
+
+        timestep = frame["timestep_index"] if 'timestep_index' in frame else None
+        camera_id = frame["camera_index"] if 'camera_id' in frame else None
+        torso_image_path = os.path.join(path, 'torso_imgs', str(frame['timestep_index']) + '.png')
+        mask_path = os.path.join(path, 'parsing', f'{timestep}.png')
+        full_image_path = os.path.join(path, 'ori_imgs', f'{timestep}.jpg')
+        
+        # Landmark and extract face
+        lms = np.loadtxt(os.path.join(path, 'ori_imgs', str(frame['timestep_index']) + '.lms')) # [68, 2]
+
+        lh_xmin, lh_xmax = int(lms[31:36, 1].min()), int(lms[:, 1].max()) # actually lower half area
+        xmin, xmax = int(lms[:, 1].min()), int(lms[:, 1].max())
+        ymin, ymax = int(lms[:, 0].min()), int(lms[:, 0].max())
+        face_rect = [xmin, xmax, ymin, ymax]
+        lhalf_rect = [lh_xmin, lh_xmax, ymin, ymax]
+        
+        
+        # Eye Area and Eye Rect
+        eye_area = eye_features[frame['timestep_index']]
+        eye_area = np.clip(eye_area, 0, 2) / 2
+        
+        xmin, xmax = int(lms[36:48, 1].min()), int(lms[36:48, 1].max())
+        ymin, ymax = int(lms[36:48, 0].min()), int(lms[36:48, 0].max())
+        eye_rect = [xmin, xmax, ymin, ymax]
+        
+        # Finetune Lip Area
+        lips = slice(48, 60)
+        xmin, xmax = int(lms[lips, 1].min()), int(lms[lips, 1].max())
+        ymin, ymax = int(lms[lips, 0].min()), int(lms[lips, 0].max())
+        cx = (xmin + xmax) // 2
+        cy = (ymin + ymax) // 2
+        l = max(xmax - xmin, ymax - ymin) // 2
+        xmin = max(0, cx - l)
+        xmax = min(contents["h"], cx + l)
+        ymin = max(0, cy - l)
+        ymax = min(contents["w"], cy + l)
+
+        lips_rect = [xmin, xmax, ymin, ymax]
+        
+        if preload:
+            ori_image = cv2.imread(cam_name, cv2.IMREAD_UNCHANGED)
+            seg = cv2.imread(mask_path)
+            head_mask = (seg[..., 0] == 255) & (seg[..., 1] == 0) & (seg[..., 2] == 0)
+            
+            ori_image = cv2.cvtColor(ori_image, cv2.COLOR_BGR2RGB)
+            ori_image = torch.from_numpy(ori_image).permute(2,0,1).float() / 255.0
+            
+            # torso images 
+            torso_img = cv2.imread(torso_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 4]
+            torso_img = cv2.cvtColor(torso_img, cv2.COLOR_BGRA2RGBA)
+            torso_img = torso_img.astype(np.float32) / 255 # [H, W, 3/4]
+            
+        else:
+            ori_image = None
+            torso_img = None
+            head_mask = None
+            seg = None
+        
+
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, full_image=ori_image, full_image_path=full_image_path,
+                        image_name=image_name, width=contents["w"], height=contents["h"],
+                        torso_image=torso_img, torso_image_path=torso_image_path, bg_image=bg_img, bg_image_path=bg_image_path,
+                        mask=seg, mask_path=mask_path, trans = np.array([0.0, 0.0, 0.0]), #trans=code_dict['cam'][frame["img_id"]], #trans=trans_infos[frame["img_id"]],
+                        face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=aud_feature, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect))
+        # cam_infos.append(CameraInfo(
+        #     uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, bg=bg, image=image, 
+        #     image_path=image_path, image_name=image_name, 
+        #     width=width, height=height, 
+        #     timestep=timestep, camera_id=camera_id))
+    
+    # contents["fl_x"] = contents["focal_len"]
+    # contents["fl_y"] = contents["focal_len"]
+    # contents["w"] = contents["cx"] * 2
+    # contents["h"] = contents["cy"] * 2
+
+    # fovx = focal2fov(contents['fl_x'],contents['w'])
+    # fovy = focal2fov(contents['fl_y'],contents['h'])
+    # frames = contents["frames"]
+    # f_path = os.path.join(path, "ori_imgs")
+    
+    # FovY = fovy 
+    # FovX = fovx
+    
+    # # background_image
+    # bg_image_path = os.path.join(path, "bc.jpg")
+    # bg_img = cv2.imread(bg_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 3]
+    # if bg_img.shape[0] != contents["h"] or bg_img.shape[1] != contents["w"]:
+    #     bg_img = cv2.resize(bg_img, (contents["w"], contents["h"]), interpolation=cv2.INTER_AREA)
+    # bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+    # bg_img = torch.from_numpy(bg_img).permute(2,0,1).float() / 255.0
+        
+    # if custom_aud:
+    #     auds = aud_features
+    # else:    
+    #     auds = [aud_features[min(frame['aud_id'], aud_features.shape[0] - 1)] for frame in frames]
+    #     auds = torch.stack(auds, dim=0)
+        
+    # for idx, frame in enumerate(frames): # len(frames): 7272
+        
+    #     cam_name = os.path.join(f_path, str(frame["img_id"]) + extension)
+    #     aud_feature = get_audio_features(auds, att_mode = 2, index = idx)     
+        
+    #     breakpoint()
+    #     # Camera Codes
+    #     euler = track_params["euler"][frame["img_id"]]
+    #     R = euler2rot(euler.unsqueeze(0))
+        
+    #     flip_rot = torch.tensor(
+    #         [[-1,  0,  0],  # This flips the X axis
+    #         [ 0,  1,  0],  # Y axis remains the same
+    #         [ 0,  0, 1]], # This flips the Z axis, maintaining the right-hand rule
+    #         dtype=R.dtype,
+    #         device=R.device
+    #     ).view(1, 3, 3)
+    #     # flip_rot = flip_rot.expand_as(R)  # Make sure it has the same batch size as R
+
+    #     # Apply the flip rotation by matrix multiplication
+    #     # Depending on your convention, you might need to apply the flip before or after the original rotation.
+    #     # Use torch.matmul(flip_rot, R) if the flip should be applied globally first,
+    #     # or torch.matmul(R, flip_rot) if the flip should be applied in the camera's local space.
+    #     R = torch.matmul(flip_rot, R)
+    #     R = R.squeeze(0).cpu().numpy()
+    #     T = track_params["trans"][frame["img_id"]].unsqueeze(0).cpu().numpy()
+        
+    #     R = -np.transpose(R)
+    #     T = -T
+    #     T[:, 0] = -T[:, 0] 
+        
+    #     R_temp = rotation_matrices[frame["img_id"]]
+    #     # # R_temp[1:] = -R_temp[1:]
+    #     R = R_temp.numpy()
+    #     # T_temp = rotation_matrices[frame["img_id"], :, -1]
+    #     # T_temp = torch.tensor([0,0,1])
+    #     # T = T_temp.unsqueeze(dim=0).numpy()
+    #     # T[:,2] = T[:,2] + 3
+        
+    #     # torch.tensor(code_dict['camera'][0:2],0)
+    #     # Get Iamges for Facial 
+    #     image_name = Path(cam_name).stem
+
+    #     full_image_path = cam_name
+    #     torso_image_path = os.path.join(path, 'torso_imgs', str(frame['img_id']) + '.png')
+    #     mask_path = cam_name.replace('ori_imgs', 'parsing').replace('.jpg', '.png')
+        
+    #     # Landmark and extract face
+    #     lms = np.loadtxt(os.path.join(path, 'ori_imgs', str(frame['img_id']) + '.lms')) # [68, 2]
+
+    #     lh_xmin, lh_xmax = int(lms[31:36, 1].min()), int(lms[:, 1].max()) # actually lower half area
+    #     xmin, xmax = int(lms[:, 1].min()), int(lms[:, 1].max())
+    #     ymin, ymax = int(lms[:, 0].min()), int(lms[:, 0].max())
+    #     face_rect = [xmin, xmax, ymin, ymax]
+    #     lhalf_rect = [lh_xmin, lh_xmax, ymin, ymax]
+        
+    #     # Eye Area and Eye Rect
+    #     eye_area = eye_features[frame['img_id']]
+    #     eye_area = np.clip(eye_area, 0, 2) / 2
+        
+    #     xmin, xmax = int(lms[36:48, 1].min()), int(lms[36:48, 1].max())
+    #     ymin, ymax = int(lms[36:48, 0].min()), int(lms[36:48, 0].max())
+    #     eye_rect = [xmin, xmax, ymin, ymax]
+        
+    #     # Finetune Lip Area
+    #     lips = slice(48, 60)
+    #     xmin, xmax = int(lms[lips, 1].min()), int(lms[lips, 1].max())
+    #     ymin, ymax = int(lms[lips, 0].min()), int(lms[lips, 0].max())
+    #     cx = (xmin + xmax) // 2
+    #     cy = (ymin + ymax) // 2
+    #     l = max(xmax - xmin, ymax - ymin) // 2
+    #     xmin = max(0, cx - l)
+    #     xmax = min(contents["h"], cx + l)
+    #     ymin = max(0, cy - l)
+    #     ymax = min(contents["w"], cy + l)
+
+    #     lips_rect = [xmin, xmax, ymin, ymax]
+        
+    #     if preload:
+    #         ori_image = cv2.imread(cam_name, cv2.IMREAD_UNCHANGED)
+    #         seg = cv2.imread(mask_path)
+    #         head_mask = (seg[..., 0] == 255) & (seg[..., 1] == 0) & (seg[..., 2] == 0)
+            
+    #         ori_image = cv2.cvtColor(ori_image, cv2.COLOR_BGR2RGB)
+    #         ori_image = torch.from_numpy(ori_image).permute(2,0,1).float() / 255.0
+            
+    #         # torso images 
+    #         torso_img = cv2.imread(torso_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 4]
+    #         torso_img = cv2.cvtColor(torso_img, cv2.COLOR_BGRA2RGBA)
+    #         torso_img = torso_img.astype(np.float32) / 255 # [H, W, 3/4]
+            
+    #     else:
+    #         ori_image = None
+    #         torso_img = None
+    #         head_mask = None
+    #         seg = None
+        
+    return cam_infos     
+
+
 def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg",custom_aud=None):
     # Audio Information
     aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
@@ -365,9 +635,11 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
     
     timestamp_mapper, max_time = read_timeline(path)
     print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_train.json", aud_features, eye_features, extension, timestamp_mapper, preload = False)
+    train_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_train.json", 
+                                                      aud_features, eye_features, extension, timestamp_mapper, preload = False)
     print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_val.json", aud_features, eye_features, extension, timestamp_mapper)
+    test_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_val.json", 
+                                                     aud_features, eye_features, extension, timestamp_mapper)
     print("Generating Video Transforms")
     video_cam_infos = None 
 
@@ -422,6 +694,101 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
     return scene_info
 
 
+
+
+def readTalkingPortraitDatasetInfo_deca(path, white_background, eval, extension=".jpg",custom_aud=None):
+    # Audio Information
+    aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
+    aud_features = torch.from_numpy(aud_features)
+
+    # support both [N, 16] labels and [N, 16, K] logits
+    if len(aud_features.shape) == 3:
+        aud_features = aud_features.float().permute(0, 2, 1) # [N, 16, 29] --> [N, 29, 16]    
+    else:
+        raise NotImplementedError(f'[ERROR] aud_features.shape {aud_features.shape} not supported')
+
+
+    print(f'[INFO] load aud_features: {aud_features.shape}')
+    
+    # load action units
+    import pandas as pd
+    au_blink_info=pd.read_csv(os.path.join(path, 'au.csv'))
+    eye_features = au_blink_info[' AU45_r'].values
+    
+    
+    ply_path = os.path.join(path, "fused.ply")
+    mesh_path = os.path.join(path, "track_params.pt")
+    
+    timestamp_mapper, max_time = read_timeline(path)
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTracksTransforms_deca(path, "track_params.pt", "transforms_train.json", 
+                                                      aud_features, eye_features, extension, timestamp_mapper, preload = False)
+    print("Reading Test Transforms")
+    test_cam_infos = readCamerasFromTracksTransforms_deca(path, "track_params.pt", "transforms_test.json", 
+                                                     aud_features, eye_features, extension, timestamp_mapper)
+    print("Generating Video Transforms")
+    video_cam_infos = None 
+
+    if custom_aud:
+        aud_features = np.load(os.path.join(path, custom_aud))
+        aud_features = torch.from_numpy(aud_features)
+        if len(aud_features.shape) == 3:
+            aud_features = aud_features.float().permute(0, 2, 1) # [N, 16, 29] --> [N, 29, 16]    
+        else:
+            raise NotImplementedError(f'[ERROR] aud_features.shape {aud_features.shape} not supported')
+        print("Reading Custom Transforms")
+        custom_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_test.json", aud_features, eye_features, extension, 
+                                                           timestamp_mapper,custom_aud=custom_aud)
+    else:
+        custom_cam_infos=None
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        # num_pts = 2000
+        # print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        
+        # Initialize with Flame Vertices
+        # facial_mesh = torch.load(mesh_path)["vertices"]
+        
+        flames = load_shape_from_obj(os.path.join(path, '0_detail.obj'))
+        average_facial_mesh = torch.tensor(flames['vertices'])[:,:3]
+        
+        # flames = load_shape_from_obj('./flame_model/assets/flame/head_template_mesh.obj')
+        
+        
+        # verts, faces, aux = load_obj('./flame_model/assets/flame/head_template_mesh.obj', load_textures=False)
+        # average_facial_mesh = verts
+        # average_facial_mesh[:,1:] = -average_facial_mesh[:,1:]
+        
+        
+        xyz = average_facial_mesh.cpu().numpy()
+        shs = np.random.random((xyz.shape[0], 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((xyz.shape[0], 3)))        
+        
+        
+    else:
+        raise NotImplementedError("No ply file found!")
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           video_cameras=video_cam_infos,
+                           custom_cameras=custom_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           maxtime=max_time
+                           )
+    return scene_info
+
+
 sceneLoadTypeCallbacks2 = {
     "ER-NeRF": readTalkingPortraitDatasetInfo,
+    "deca" : readTalkingPortraitDatasetInfo_deca,
 }

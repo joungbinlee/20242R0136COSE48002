@@ -462,3 +462,27 @@ def get_audio_features(features, att_mode, index):
       return auds
   else:
       raise NotImplementedError(f'wrong att_mode: {att_mode}')
+    
+    
+def load_shape_from_obj(file_path):
+  try:
+      vertices = []
+      faces = []
+      with open(file_path) as f:
+          for line in f:
+              if line[0] == "v":
+                  vertex = list(map(float, line[2:].strip().split()))
+                  vertices.append(vertex)
+              elif line[0] == "f":
+                  face = list(map(int, line[2:].strip().split()))
+                  faces.append(face)
+
+      shape_data = {"vertices": vertices, "faces": faces}
+
+      return shape_data
+
+  except FileNotFoundError:
+      print(f"{file_path} not found.")
+  except:
+      print("An error occurred while loading the shape.")
+      breakpoint()

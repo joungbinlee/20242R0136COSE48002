@@ -69,18 +69,21 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
         
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
         tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-            
+        
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
             tanfovx= tanfovx,
             tanfovy= tanfovy,
             bg=bg_image,
+            # bg=torch.ones_like(bg_image),
             scale_modifier=scaling_modifier,
+            # scale_modifier=viewpoint_camera.scale,
             viewmatrix=viewpoint_camera.world_view_transform.cuda(),
             projmatrix=viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=pc.active_sh_degree,
             campos=viewpoint_camera.camera_center.cuda(),
+            # campos=viewpoint_camera.trans.cuda(),
             prefiltered=False,
             debug=pipe.debug
         )
