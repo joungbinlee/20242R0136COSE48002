@@ -9,6 +9,7 @@ screenshots
 data/
 data
 wandb/
+flame_model/
 
 *.jpg
 *.mp4
