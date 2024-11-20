@@ -4,3 +4,6 @@
 [submodule "submodules/custom-bg-depth-diff-gaussian-rasterization"]
 	path = submodules/custom-bg-depth-diff-gaussian-rasterization
 	url = https://github.com/joungbinlee/custom-bg-depth-diff-gaussian-rasterization.git
+[submodule "diffusers"]
+	path = diffusers
+	url = https://github.com/huggingface/diffusers

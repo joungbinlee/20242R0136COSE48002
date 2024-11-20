@@ -1,5 +1,5 @@
 import torch.nn as nn
-from scene.hexplane import HexPlaneField
+from scene.hexplane import HexPlaneField,HexPlaneField_Conv
 
 
 class canonical_tri_plane(nn.Module):
@@ -8,7 +8,7 @@ class canonical_tri_plane(nn.Module):
         self.W = W
         self.D = D
         self.args = args
-        self.grid = HexPlaneField(args.bounds, args.kplanes_config, args.multires)
+        self.grid = HexPlaneField_Conv(args.bounds, args.kplanes_config, args.multires)
         
         self.feature_out = [nn.Linear(args.d_model,self.W)]
         
@@ -16,12 +16,16 @@ class canonical_tri_plane(nn.Module):
             self.feature_out.append(nn.ReLU())
             self.feature_out.append(nn.Linear(self.W,self.W))
         self.feature_out = nn.Sequential(*self.feature_out)
+        self.mu = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
         self.scales = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
         self.rotations = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4))
         self.opacity = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         self.shs = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
 
     def mlp_init_zeros(self):
+        
+        nn.init.xavier_uniform_(self.mu[-1].weight,gain=0.1)
+        nn.init.zeros_(self.mu[-1].bias)
         
         nn.init.xavier_uniform_(self.scales[-1].weight,gain=0.1)
         nn.init.zeros_(self.scales[-1].bias)
@@ -37,27 +41,29 @@ class canonical_tri_plane(nn.Module):
         
     def mlp2cpu(self):
         self.feature_out = self.feature_out.to('cpu')
+        self.mu = self.mu.to('cpu')
         self.scales = self.scales.to('cpu')
         self.rotations = self.rotations.to('cpu')
         self.opacity = self.opacity.to('cpu')
         self.shs = self.shs.to('cpu')
         
-    def forward(self, rays_pts_emb, only_feature = False, train_tri_plane=True):
-        scale, rotation, opacity, sh = None,None,None,None
+    def forward(self, posterior, rays_pts_emb, only_feature = False, train_tri_plane=True):
+        mu, scale, rotation, opacity, sh = None,None,None,None,None
         B,_,_ = rays_pts_emb.shape
-        feature = self.grid(rays_pts_emb[0,:,:3]).unsqueeze(dim=0).repeat(B,1,1)
+        feature = self.grid(posterior, rays_pts_emb[0,:,:3]).unsqueeze(dim=0).repeat(B,1,1)
         if only_feature:
             if train_tri_plane == False:
                 feature = feature.detach()
             return feature
         
         feature = self.feature_out(feature)
+        mu = self.mu(feature)
         scale = self.scales(feature)
         rotation = self.rotations(feature)
         opacity = self.opacity(feature)
         sh = self.shs(feature)
         
-        return feature, scale, rotation, opacity, sh
+        return feature, mu, scale, rotation, opacity, sh
         
 
 

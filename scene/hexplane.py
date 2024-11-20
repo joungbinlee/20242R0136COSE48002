@@ -5,8 +5,38 @@ from typing import Optional, Union, List, Dict, Sequence, Iterable, Collection, 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+class CustomConvModel(nn.Module):
+    def __init__(self, input_dim, output_dims=[64, 128], hidden_dim=32, kernel_size=3):
+        super(CustomConvModel, self).__init__()
+        
+        self.conv_blocks = nn.ModuleList()
+        
+        # 각 출력 크기에 대해 독립적인 3개의 컨볼루션 블록 생성
+        for output_size in output_dims:
+            blocks = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, stride=1, padding=kernel_size // 2),
+                    nn.ReLU(),
+                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, stride=1, padding=kernel_size // 2),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool2d(output_size)
+                ) for _ in range(3)
+            ])
+            self.conv_blocks.append(blocks)
 
-
+    def forward(self, x):
+        results = []
+        
+        # 각 output_size에 대해 독립적인 컨볼루션 블록들을 실행
+        for block_group in self.conv_blocks:
+            group_results = []
+            for conv_block in block_group:
+                output = conv_block(x)
+                group_results.append(output)
+            results.append(group_results)
+        
+        return results
+    
 def get_normalized_directions(directions):
     """SH encoding must be in the range [0, 1]
 
@@ -90,7 +120,8 @@ def interpolate_ms_features(pts: torch.Tensor,
             feature_dim = grid[ci].shape[1]  # shape of grid[ci]: 1, out_dim, *reso
             interp_out_plane = ( #N, 16
                 grid_sample_wrapper(grid[ci], pts[..., coo_comb])
-                .view(-1, feature_dim)
+                .reshape(-1, feature_dim)
+                # .view(-1, feature_dim)
             )
             # compute product over planes
             interp_space = interp_space * interp_out_plane
@@ -174,7 +205,89 @@ class HexPlaneField(nn.Module):
         return features
     
     
-    def forward(self, pts: torch.Tensor):
+    def forward(self, posterior: torch.Tensor, pts: torch.Tensor):
         features = self.get_density(pts)
+
+        return features
+
+
+
+
+class HexPlaneField_Conv(nn.Module):
+    def __init__(
+        self,
+        
+        bounds,
+        planeconfig,
+        multires
+    ) -> None:
+        super().__init__()
+        aabb = torch.tensor([[bounds,bounds,bounds],
+                             [-bounds,-bounds,-bounds]])
+        self.aabb = nn.Parameter(aabb, requires_grad=False)
+        self.grid_config =  [planeconfig]
+        self.multiscale_res_multipliers = multires
+        self.concat_features = True
+        
+        self.conv_in = CustomConvModel(
+            4,[64,128],
+        )
+
+        # 1. Init planes
+        self.grids = nn.ModuleList()
+        self.feat_dim = 0
+        for res in self.multiscale_res_multipliers:
+            # initialize coordinate grid
+            config = self.grid_config[0].copy()
+            # Resolution fix: multi-res only on spatial planes
+            config["resolution"] = [
+                r * res for r in config["resolution"][:3]
+            ] + config["resolution"][3:]
+            gp = init_grid_param(
+                grid_nd=config["grid_dimensions"],
+                in_dim=config["input_coordinate_dim"],
+                out_dim=config["output_coordinate_dim"],
+                reso=config["resolution"],
+            )
+            # shape[1] is out-dim - Concatenate over feature len for each scale
+            if self.concat_features:
+                self.feat_dim += gp[-1].shape[1]
+            else:
+                self.feat_dim = gp[-1].shape[1]
+            self.grids.append(gp)
+        # print(f"Initialized model grids: {self.grids}")
+        print("feature_dim:",self.feat_dim)
+    @property
+    def get_aabb(self):
+        return self.aabb[0], self.aabb[1]
+    def set_aabb(self,xyz_max, xyz_min):
+        aabb = torch.tensor([
+            xyz_max,
+            xyz_min
+        ],dtype=torch.float32)
+        self.aabb = nn.Parameter(aabb,requires_grad=False)
+        print("Voxel Plane: set aabb=",self.aabb)
+
+
+    def get_density(self, posterior: torch.Tensor, pts: torch.Tensor):
+        """Computes and returns the densities."""
+        # breakpoint()
+        grids = self.conv_in(posterior)
+        pts = normalize_aabb(pts, self.aabb) # N, 3
+        pts = pts.reshape(-1, pts.shape[-1]) # 3, N
+        features = interpolate_ms_features(
+            # pts, ms_grids=self.grids, 
+            pts, ms_grids=grids, 
+            grid_dimensions=self.grid_config[0]["grid_dimensions"], 
+            concat_features=self.concat_features, num_levels=None) 
+        if len(features) < 1:
+            features = torch.zeros((0, 1)).to(features.device)
+
+
+        return features
+    
+    
+    def forward(self, posterior: torch.Tensor, pts: torch.Tensor):
+        features = self.get_density(posterior, pts)
 
         return features

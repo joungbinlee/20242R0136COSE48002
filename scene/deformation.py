@@ -206,18 +206,18 @@ class Deformation(nn.Module):
     @property
     def get_empty_ratio(self):
         return self.ratio
-    def forward(self, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity = None,shs_emb=None, audio_features=None, eye_features=None,cam_features=None):
+    def forward(self, posterior, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity = None,shs_emb=None, audio_features=None, eye_features=None,cam_features=None):
         if audio_features is None:
-            return self.forward_static(rays_pts_emb)
+            return self.forward_static(posterior, rays_pts_emb)
         elif len(rays_pts_emb.shape)==3:
             return self.forward_dynamic_batch(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features, cam_features)
         elif len(rays_pts_emb.shape)==2:
             return self.forward_dynamic(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features)
 
-    def forward_static(self, rays_pts_emb):
-        grid_feature, scale, rotation, opacity, sh = self.tri_plane(rays_pts_emb)
+    def forward_static(self, posterior, rays_pts_emb):
+        grid_feature, mu, scale, rotation, opacity, sh = self.tri_plane(posterior, rays_pts_emb)
         # dx = self.static_mlp(grid_feature)
-        return rays_pts_emb, scale, rotation, opacity, sh.reshape([sh.shape[0],sh.shape[1],16,3])
+        return rays_pts_emb, mu, scale, rotation, opacity, sh.reshape([sh.shape[0],sh.shape[1],16,3])
     
     def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, audio_features, eye_features):
         hidden, attention = self.attention_query_audio(rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features)
@@ -358,11 +358,11 @@ class deform_network(nn.Module):
         self.rotations_emb = None
         # print(self)
 
-    def forward(self, point, scales=None, rotations=None, opacity=None, shs=None, audio_features = None, eye_features=None, cam_features =None):
+    def forward(self, posterior ,point, scales=None, rotations=None, opacity=None, shs=None, audio_features = None, eye_features=None, cam_features =None):
         if audio_features is not None:
-            return self.forward_dynamic(point, scales, rotations, opacity, shs, audio_features, eye_features, cam_features)
+            return self.forward_dynamic(posterior, point, scales, rotations, opacity, shs, audio_features, eye_features, cam_features)
         else:
-            return self.forward_static(point, scales, rotations, opacity, shs)
+            return self.forward_static(posterior, point, scales, rotations, opacity, shs)
     @property
     def get_aabb(self):
         
@@ -371,10 +371,11 @@ class deform_network(nn.Module):
     def get_empty_ratio(self):
         return self.deformation_net.get_empty_ratio
         
-    def forward_static(self, points, scales, rotations, opacity, shs):
-        points = self.deformation_net(points)
+    def forward_static(self, posterior, points, scales, rotations, opacity, shs):
+        # breakpoint()
+        points = self.deformation_net(posterior, points)
         return points
-    def forward_dynamic(self, point, scales=None, rotations=None, opacity=None, shs=None, audio_features=None, eye_features=None, cam_features=None):
+    def forward_dynamic(self, posterior, point, scales=None, rotations=None, opacity=None, shs=None, audio_features=None, eye_features=None, cam_features=None):
         if self.only_infer:
             if self.point_emb == None:
                 self.point_emb = poc_fre(point,self.pos_poc)         # #, 3 -> #, 63
@@ -394,6 +395,7 @@ class deform_network(nn.Module):
             return means3D, scales, rotations, opacity, shs, attention
 
         else:
+            breakpoint()
             point_emb = poc_fre(point,self.pos_poc)         # B, N, 3 -> B, N, 63
             scales_emb = poc_fre(scales,self.rotation_scaling_poc)
             rotations_emb = poc_fre(rotations,self.rotation_scaling_poc)
