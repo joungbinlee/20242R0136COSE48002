@@ -33,6 +33,7 @@ conda activate GaussianTalker
 pip install -r requirements.txt
 pip install -e submodules/custom-bg-depth-diff-gaussian-rasterization
 pip install -e submodules/simple-knn
+pip install -e ./diffusers
 pip install "git+https://github.com/facebookresearch/pytorch3d.git"
 pip install tensorflow-gpu==2.8.0
 pip install --upgrade "protobuf<=3.20.1"
