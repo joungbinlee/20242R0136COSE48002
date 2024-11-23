@@ -31,7 +31,7 @@ OptimizationParams = dict(
     densification_interval = 100,
     iterations = 30000,
     batch_size=32,
-    coarse_iterations = 7999,
+    coarse_iterations = 87999,
     densify_until_iter = 7000,
     opacity_threshold_coarse = 0.005,
     opacity_threshold_fine_init = 0.005,
@@ -43,4 +43,5 @@ OptimizationParams = dict(
     deformation_lr_init = 0.0001,
     split_gs_in_fine_stage=False,
     canonical_tri_plane_factor_list=["mu","scales","rotations","opacity","shs"], #["scales","rotations","opacity","shs"]
+    train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation","vae"]
 )

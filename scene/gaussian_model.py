@@ -44,7 +44,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, args):
+    def __init__(self, sh_degree : int, args, vae=None):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
@@ -62,6 +62,7 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self._deformation_table = torch.empty(0)
         self.setup_functions()
+        self.vae = vae
         
     def capture(self):
         return (
@@ -183,8 +184,10 @@ class GaussianModel:
             train_l.append({'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"})
         if "rotation" in training_args.train_l:
             train_l.append({'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"})
+        if "vae" in training_args.train_l:
+            train_l.append({'params': self.vae.parameters(), 'lr': training_args.vae_lr, "name": "vae"})
             
-        self.optimizer = torch.optim.Adam(train_l, lr=0.0, eps=1e-15)
+        self.optimizer = torch.optim.AdamW(train_l, lr=0.02, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
@@ -197,6 +200,11 @@ class GaussianModel:
                                                     lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.deformation_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)    
+        
+        self.vae_scheduler_args = get_expon_lr_func(lr_init=training_args.vae_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.vae_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)    
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -204,15 +212,18 @@ class GaussianModel:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
-                # return lr
+                
             if  "grid" in param_group["name"]:
                 lr = self.grid_scheduler_args(iteration)
                 param_group['lr'] = lr
-                # return lr
+                
             elif param_group["name"] == "deformation":
                 lr = self.deformation_scheduler_args(iteration)
                 param_group['lr'] = lr
-                # return lr
+
+            elif param_group["name"] == "vae":
+                lr = self.vae_scheduler_args(iteration)
+                param_group['lr'] = lr
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']

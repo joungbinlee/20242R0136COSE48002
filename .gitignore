@@ -13,6 +13,7 @@ wandb/
 *.jpg
 *.mp4
 *.pth
+*.sh
 
 render_orig.py
 

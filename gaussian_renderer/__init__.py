@@ -366,9 +366,8 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         bg_mask = bg_mask.to(torch.float).unsqueeze(0).unsqueeze(0)
         gt_masks.append(bg_mask)
         
-        posterior = vae.encode(gt_image.unsqueeze(dim=0)*2-1).latent_dist.sample()
+        posterior = vae.module.encode(gt_image.unsqueeze(dim=0)*2-1).latent_dist.sample()
 
-    
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
         _, mu_temp, scales_temp, rotations_temp, opacity_temp, shs_temp = pc._deformation(

@@ -30,6 +30,7 @@ import lpips
 import copy
 import wandb
 from diffusers import AutoencoderKL
+from accelerate import Accelerator
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
@@ -41,12 +42,9 @@ except ImportError:
     
 from utils.loss_utils import VGGPerceptualLoss
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-vgg_perceptual_loss = VGGPerceptualLoss().to(device)
-    
 def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer, use_wandb=False):
+                         gaussians, scene, stage, tb_writer, train_iter,timer, use_wandb=False, vgg_perceptual_loss = None, accelerator = None):
     first_iter = 0
     gaussians.training_setup(opt)
     if checkpoint:
@@ -87,6 +85,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
         else:
             viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=32,collate_fn=list, drop_last = True)
             random_loader = True
+        viewpoint_stack_loader = accelerator.prepare(viewpoint_stack_loader)
         loader = iter(viewpoint_stack_loader)
     
     if stage == "coarse" and opt.zerostamp_init:
@@ -130,14 +129,13 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                 if not random_loader:
                     viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
                     random_loader = True
+                viewpoint_stack_loader = accelerator.prepare(viewpoint_stack_loader)
                 loader = iter(viewpoint_stack_loader)
 
         else:
             idx = 0
             viewpoint_cams = []
-
             while idx < batch_size :    
-                    
                 viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
                 if not viewpoint_stack :
                     viewpoint_stack =  temp_list.copy()
@@ -176,7 +174,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             depth_loss = l1_loss(output["gt_masks_tensor"],generated_mask)*0.4
             loss += depth_loss
         
-        loss.backward()
+        # loss.backward()
+        accelerator.backward(loss)
         if torch.isnan(loss).any():
             print("loss is nan,end training, reexecv program now.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -191,7 +190,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             ema_psnr_for_log = 0.4 * psnr_ + 0.6 * ema_psnr_for_log
             total_point = gaussians._xyz.shape[0]
             
-            if use_wandb:
+            if use_wandb and accelerator.is_main_process:
                 if iteration % 10 == 0:
                     log_dict = {"Ll1":Ll1.item()*0.8 , "psnr":psnr_, "perceptual_loss":perceptual_loss.item()*0.01, "ssim_loss":0.2*(1-ssim_loss.item()), "loss":loss.item(), 'total_point': total_point}
                     for i, params in enumerate(opt.train_l): 
@@ -202,7 +201,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                         log_dict["depth_loss"] = depth_loss.item() 
                     wandb.log(log_dict)    
                 
-            if iteration % 10 == 0:
+            if iteration % 10 == 0 and accelerator.is_main_process:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}",
                                           "psnr": f"{psnr_:.{2}f}",
                                           "point":f"{total_point}"})
@@ -212,9 +211,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
 
             # Log and save
             timer.pause()
-            if iteration % 500 == 0 or iteration == 1:
+            if accelerator.is_main_process and (iteration % 500 == 0 or iteration == 1):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
+                vae_path = os.path.join(scene.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
+                vae.module.save_pretrained(os.path.join(vae_path,'sd-vae-ft-mse'), safe_serialization=False)
+                accelerator.save_state(scene.model_path)
                 
             timer.start()
             # Densification
@@ -259,36 +261,43 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 
                 
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, use_wandb):
+def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_iterations, 
+             checkpoint_iterations, checkpoint, debug_from, expname, use_wandb, vae_pretrained):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
-    if use_wandb:
+    if use_wandb and accelerator.is_main_process:
         wandb.init(project="TalkingGaussians", name=expname)
+    
+    
+    vae = AutoencoderKL.from_pretrained(vae_pretrained).to(dtype=torch.float32)
+
+    if "vae" in opt.train_l:
+        vae.requires_grad_(True)
+    else:
+        vae.requires_grad_(False)
         
-    gaussians = GaussianModel(dataset.sh_degree, hyper)
+    gaussians = GaussianModel(dataset.sh_degree, hyper, vae)
     dataset.model_path = args.model_path
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
     timer.start()
-
-    train_l_temp=opt.train_l
-    opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
+    vgg_perceptual_loss = VGGPerceptualLoss()
+    # train_l_temp=opt.train_l
+    # opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
     print(opt.train_l)
-    
-    vae = AutoencoderKL.from_pretrained('/media/dataset2/joungbin/animate_anyone/pretrained_weights/sd-vae-ft-mse').to(
-        "cuda", dtype=torch.float32
-    )
-    vae.requires_grad_(True)
+
+    dataset, scene, gaussians, vae, vgg_perceptual_loss  = accelerator.prepare(dataset, scene, gaussians, vae, vgg_perceptual_loss)
+
     
     scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
-                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
+                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb, vgg_perceptual_loss, accelerator)
     
-    opt.train_l = train_l_temp
-    print(opt.train_l)
-    scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations,
-                         checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, opt.iterations,timer, use_wandb)
+    # opt.train_l = train_l_temp
+    # print(opt.train_l)
+    # scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations,
+    #                      checkpoint_iterations, checkpoint, debug_from,
+    #                      gaussians, scene, "fine", tb_writer, opt.iterations,timer, use_wandb)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -396,6 +405,7 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--vae_pretrained", type=str, default = "", required=True)
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -410,9 +420,15 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    network_gui.init(args.ip, args.port)
+    # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.use_wandb)
+    
+    accelerator = Accelerator()
+    local_rank = int(os.getenv("LOCAL_RANK", 0))  # LOCAL_RANK is set by accelerate
+    torch.cuda.set_device(local_rank)
+
+    training(accelerator, lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, 
+             args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.use_wandb, args.vae_pretrained)
 
     # All done
     print("\nTraining complete.")
