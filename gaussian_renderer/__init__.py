@@ -339,6 +339,7 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
         tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+        
             
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
@@ -366,12 +367,14 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         bg_mask = bg_mask.to(torch.float).unsqueeze(0).unsqueeze(0)
         gt_masks.append(bg_mask)
         
-        posterior = vae.module.encode(gt_image.unsqueeze(dim=0)*2-1).latent_dist.sample()
+    gt_tensor = torch.cat(gt_imgs,0)
+    posterior = vae.module.encode(gt_tensor*2-1).latent_dist
+    z = posterior.sample()
 
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
         _, mu_temp, scales_temp, rotations_temp, opacity_temp, shs_temp = pc._deformation(
-            posterior, means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
+            z, means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
         if "mu" in canonical_tri_plane_factor_list:
             means3D_final = means3D + mu_temp
         else: 
@@ -451,7 +454,7 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
             gt_lip_crop = gt_imgs[idx][:,:,y1:y2,x1:x2]
             rendered_lips.append(lip_crop.flatten())
             gt_lips.append(gt_lip_crop.flatten())
-            
+
         audio_image, eye_image ,cam_image, null_image = None, None, None, None
         if visualize_attention:
             colors_precomp = attention.mean(dim=1)[idx,:,0].unsqueeze(1).repeat(1, 3)
@@ -534,7 +537,7 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         cam_image_tensor = torch.cat(cam_image_list, 0)
         null_image_tensor = torch.cat(null_image_list,0)
     
-    rendered_lips_tensor ,gt_lips_tensor, rendered_w_bg_tensor = None, None, None
+    rendered_lips_tensor, gt_lips_tensor, rendered_w_bg_tensor = None, None, None
     inference_time = None
     
     if not only_infer:
@@ -561,4 +564,5 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         "inference_time":inference_time,
         "gt_masks_tensor":gt_masks_tensor,
         "gt_w_bg_tensor":gt_w_bg_tensor,
+        "posterior":posterior,
         }

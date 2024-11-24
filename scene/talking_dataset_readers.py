@@ -31,10 +31,12 @@ from scene.gaussian_model import BasicPointCloud
 from utils.general_utils import PILtoTorch
 from tqdm import tqdm
 from scene.utils import get_audio_features
+import pandas as pd
 
 import cv2
 
 from scene.dataset_readers import read_timeline, getNerfppNorm
+from scene.talking_dataset_readers_batch import readTalkingPortraitDatasetInfo_batch
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -228,11 +230,12 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
     
     # background_image
     bg_image_path = os.path.join(path, "bc.jpg")
-    bg_img = cv2.imread(bg_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 3]
-    if bg_img.shape[0] != contents["h"] or bg_img.shape[1] != contents["w"]:
-        bg_img = cv2.resize(bg_img, (contents["w"], contents["h"]), interpolation=cv2.INTER_AREA)
-    bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
-    bg_img = torch.from_numpy(bg_img).permute(2,0,1).float() / 255.0
+    if preload:
+        bg_img = cv2.imread(bg_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 3]
+        if bg_img.shape[0] != contents["h"] or bg_img.shape[1] != contents["w"]:
+            bg_img = cv2.resize(bg_img, (contents["w"], contents["h"]), interpolation=cv2.INTER_AREA)
+        bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+        bg_img = torch.from_numpy(bg_img).permute(2,0,1).float() / 255.0
         
     if custom_aud:
         auds = aud_features
@@ -327,7 +330,7 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
             torso_img = None
             head_mask = None
             seg = None
-        
+            bg_img = None
 
         cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, full_image=ori_image, full_image_path=full_image_path,
                         image_name=image_name, width=contents["w"], height=contents["h"],
@@ -342,22 +345,8 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
 
 def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg",custom_aud=None):
     # Audio Information
-    aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
-    aud_features = torch.from_numpy(aud_features)
-
-    # support both [N, 16] labels and [N, 16, K] logits
-    if len(aud_features.shape) == 3:
-        aud_features = aud_features.float().permute(0, 2, 1) # [N, 16, 29] --> [N, 29, 16]    
-    else:
-        raise NotImplementedError(f'[ERROR] aud_features.shape {aud_features.shape} not supported')
-
-
-    print(f'[INFO] load aud_features: {aud_features.shape}')
-    
-    # load action units
-    import pandas as pd
-    au_blink_info=pd.read_csv(os.path.join(path, 'au.csv'))
-    eye_features = au_blink_info[' AU45_r'].values
+    aud_features = load_audio_features(path)    
+    eye_features = load_eye_features(path)
     
     ply_path = os.path.join(path, "fused.ply")
     mesh_path = os.path.join(path, "track_params.pt")
@@ -388,24 +377,12 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    
-
-
     if not os.path.exists(ply_path):
-        # Since this data set has no colmap data, we start with random points
-        # num_pts = 2000
-        # print(f"Generating random point cloud ({num_pts})...")
-
-        # We create random points inside the bounds of the synthetic Blender scenes
-        
-        # Initialize with 3DMM Vertices
         facial_mesh = torch.load(mesh_path)["vertices"]
         average_facial_mesh = torch.mean(facial_mesh, dim=0)
         xyz = average_facial_mesh.cpu().numpy()
         shs = np.random.random((xyz.shape[0], 3)) / 255.0
         pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((xyz.shape[0], 3)))        
-        
-        
     else:
         raise NotImplementedError("No ply file found!")
 
@@ -421,6 +398,24 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
     return scene_info
 
 
+def load_eye_features(path):
+    au_blink_info=pd.read_csv(os.path.join(path, 'au.csv'))
+    eye_features = au_blink_info[' AU45_r'].values
+    return eye_features
+
+def load_audio_features(path):
+    aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
+    aud_features = torch.from_numpy(aud_features)
+
+    # support both [N, 16] labels and [N, 16, K] logits
+    if len(aud_features.shape) == 3:
+        aud_features = aud_features.float().permute(0, 2, 1) # [N, 16, 29] --> [N, 29, 16]    
+    else:
+        raise NotImplementedError(f'[ERROR] aud_features.shape {aud_features.shape} not supported')
+    return aud_features
+
+
 sceneLoadTypeCallbacks2 = {
     "ER-NeRF": readTalkingPortraitDatasetInfo,
+    "ER-NeRF_Batch": readTalkingPortraitDatasetInfo_batch,
 }

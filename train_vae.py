@@ -31,6 +31,7 @@ import copy
 import wandb
 from diffusers import AutoencoderKL
 from accelerate import Accelerator
+from PIL import Image
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
@@ -47,9 +48,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                          gaussians, scene, stage, tb_writer, train_iter,timer, use_wandb=False, vgg_perceptual_loss = None, accelerator = None):
     first_iter = 0
     gaussians.training_setup(opt)
-    if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+    # if checkpoint:
+    #     (model_params, first_iter) = torch.load(checkpoint)
+    #     gaussians.restore(model_params, opt)
 
 
     if stage == "fine" and first_iter == 0:
@@ -157,14 +158,16 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
         radii=output["radii"]
         viewspace_point_tensor_list=output["viewspace_point_tensor_list"] 
         viewspace_point_tensor = viewspace_point_tensor_list[0]
-        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
+        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:]) * 0.8
 
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
-        perceptual_loss = vgg_perceptual_loss(image_tensor, gt_image_tensor[:,:3,:,:])
+        perceptual_loss = vgg_perceptual_loss(image_tensor, gt_image_tensor[:,:3,:,:]) * 0.01
     
-        ssim_loss = ssim(image_tensor,gt_image_tensor)
+        ssim_loss = 0.2 * (1.0 - ssim(image_tensor,gt_image_tensor))
         
-        loss = 0.8 * Ll1 + 0.01* perceptual_loss + 0.2 * (1.0-ssim_loss)
+        posterior_loss = output["posterior"].kl().mean() * 0.0005
+        
+        loss = Ll1 + perceptual_loss + ssim_loss + posterior_loss
         
         if opt.lip_fine_tuning:
             lip_l1_loss = l1_loss(output["rendered_lips_tensor"],output["gt_lips_tensor"])*0.4
@@ -175,8 +178,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             loss += depth_loss
         
         # loss.backward()
+        accelerator.wait_for_everyone()
         accelerator.backward(loss)
         if torch.isnan(loss).any():
+            breakpoint()
             print("loss is nan,end training, reexecv program now.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
@@ -192,13 +197,24 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             
             if use_wandb and accelerator.is_main_process:
                 if iteration % 10 == 0:
-                    log_dict = {"Ll1":Ll1.item()*0.8 , "psnr":psnr_, "perceptual_loss":perceptual_loss.item()*0.01, "ssim_loss":0.2*(1-ssim_loss.item()), "loss":loss.item(), 'total_point': total_point}
+                    log_dict = {"Ll1":Ll1.item() , "psnr":psnr_, "perceptual_loss":perceptual_loss.item(), "ssim_loss":ssim_loss.item(), 
+                                "posterior_loss":posterior_loss.item() ,  "loss":loss.item(), 'total_point': total_point}
                     for i, params in enumerate(opt.train_l): 
                         log_dict[f'{params}_lr'] = torch.tensor(gaussians.optimizer.param_groups[i]['lr'])
                     if opt.lip_fine_tuning:
                         log_dict["lip_l1_loss"] = lip_l1_loss.item()
                     if opt.depth_fine_tuning:
                         log_dict["depth_loss"] = depth_loss.item() 
+                    if iteration % 500 == 0:
+                        log_dict["images"] = []
+                        for b in range(batch_size):
+                            combined_image = torch.cat(
+                                [gt_image_tensor[b], image_tensor[b]], dim=2  # Concatenate along width
+                            )  # Result: [C, H, 2*W]
+                            combined_image = combined_image.permute(1, 2, 0).cpu().numpy()  # [H, 2*W, C]
+                            combined_image = (combined_image * 255).clip(0, 255).astype('uint8')
+                            combined_image = Image.fromarray(combined_image)
+                            log_dict["images"].append(wandb.Image(combined_image))
                     wandb.log(log_dict)    
                 
             if iteration % 10 == 0 and accelerator.is_main_process:
@@ -211,12 +227,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
 
             # Log and save
             timer.pause()
-            if accelerator.is_main_process and (iteration % 500 == 0 or iteration == 1):
+            if accelerator.is_main_process and (iteration % 3000 == 0 or iteration == 1):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
                 vae_path = os.path.join(scene.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
                 vae.module.save_pretrained(os.path.join(vae_path,'sd-vae-ft-mse'), safe_serialization=False)
-                accelerator.save_state(scene.model_path)
+                accelerator.save_state(vae_path)
                 
             timer.start()
             # Densification
@@ -268,7 +284,8 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     if use_wandb and accelerator.is_main_process:
         wandb.init(project="TalkingGaussians", name=expname)
     
-    
+    if args.start_checkpoint!= None:
+        vae_pretrained = os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint,"sd-vae-ft-mse")
     vae = AutoencoderKL.from_pretrained(vae_pretrained).to(dtype=torch.float32)
 
     if "vae" in opt.train_l:
@@ -279,7 +296,7 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     gaussians = GaussianModel(dataset.sh_degree, hyper, vae)
     dataset.model_path = args.model_path
     timer = Timer()
-    scene = Scene(dataset, gaussians, load_coarse=None)
+    scene = Scene(dataset, gaussians, load_iteration = args.start_checkpoint, )
     timer.start()
     vgg_perceptual_loss = VGGPerceptualLoss()
     # train_l_temp=opt.train_l
@@ -287,6 +304,8 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     print(opt.train_l)
 
     dataset, scene, gaussians, vae, vgg_perceptual_loss  = accelerator.prepare(dataset, scene, gaussians, vae, vgg_perceptual_loss)
+    if args.start_checkpoint!= None:
+        accelerator.load_state(os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint))
 
     
     scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations,

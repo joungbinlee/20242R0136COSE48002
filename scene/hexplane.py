@@ -11,7 +11,6 @@ class CustomConvModel(nn.Module):
         
         self.conv_blocks = nn.ModuleList()
         
-        # 각 출력 크기에 대해 독립적인 3개의 컨볼루션 블록 생성
         for output_size in output_dims:
             blocks = nn.ModuleList([
                 nn.Sequential(
@@ -25,17 +24,42 @@ class CustomConvModel(nn.Module):
             self.conv_blocks.append(blocks)
 
     def forward(self, x):
+        # results = []
+        # B,_,_,_ = x.shape
+        # for b in range(B):
+        #     batch_results = []
+        #     for block_group in self.conv_blocks:
+        #         group_results = []
+        #         for conv_block in block_group:
+        #             output = conv_block(x[b:b+1])
+        #             group_results.append(output)
+        #         batch_results.append(group_results)
+        #     results.append(batch_results)
+        
         results = []
-        
-        # 각 output_size에 대해 독립적인 컨볼루션 블록들을 실행
+        B, _, _, _ = x.shape  # Get batch size
+
+        # Iterate over block groups
         for block_group in self.conv_blocks:
-            group_results = []
+            group_results = []  # To store results for the current group
+            
+            # Process entire batch for each block in the group
             for conv_block in block_group:
-                output = conv_block(x)
-                group_results.append(output)
+                output = conv_block(x)  # Process the entire batch at once
+                group_results.append(output)  # Append the batch output
+            
             results.append(group_results)
+
+        # Transpose results to group by batch
+        # Current results: [G][N][B, C, H, W]
+        # Desired results: [B][G][N][C, H, W]
+        batch_results = [
+            [[results[g][n][b].unsqueeze(dim=0) for n in range(len(results[g]))] for g in range(len(results))]
+            for b in range(B)
+        ]
+
+        return batch_results
         
-        return results
     
 def get_normalized_directions(directions):
     """SH encoding must be in the range [0, 1]
@@ -271,19 +295,21 @@ class HexPlaneField_Conv(nn.Module):
 
     def get_density(self, posterior: torch.Tensor, pts: torch.Tensor):
         """Computes and returns the densities."""
-        # breakpoint()
+        B,_,_,_ = posterior.shape
         grids = self.conv_in(posterior)
         pts = normalize_aabb(pts, self.aabb) # N, 3
         pts = pts.reshape(-1, pts.shape[-1]) # 3, N
-        features = interpolate_ms_features(
-            # pts, ms_grids=self.grids, 
-            pts, ms_grids=grids, 
-            grid_dimensions=self.grid_config[0]["grid_dimensions"], 
-            concat_features=self.concat_features, num_levels=None) 
-        if len(features) < 1:
-            features = torch.zeros((0, 1)).to(features.device)
-
-
+        features = []
+        for idx in range(B):
+            feature = interpolate_ms_features(
+                # pts, ms_grids=self.grids, 
+                pts, ms_grids=grids[idx], 
+                grid_dimensions=self.grid_config[0]["grid_dimensions"], 
+                concat_features=self.concat_features, num_levels=None) 
+            if len(feature) < 1:
+                feature = torch.zeros((0, 1)).to(feature.device)
+            features.append(feature)
+        features = torch.stack(features)
         return features
     
     

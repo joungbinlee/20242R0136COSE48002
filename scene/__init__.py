@@ -16,7 +16,7 @@ from utils.system_utils import searchForMaxIteration
 # from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.talking_dataset_readers import sceneLoadTypeCallbacks2
 from scene.gaussian_model import GaussianModel
-from scene.dataset import FourDGSdataset
+from scene.dataset import FourDGSdataset, FourDGSdataset_test
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from torch.utils.data import Dataset
@@ -47,8 +47,10 @@ class Scene:
         self.test_cameras = {}
         self.video_cameras = {}
 
-        scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](args.source_path, False, args.eval, custom_aud=custom_aud)
-        dataset_type = "ER-NeRF"
+        # scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](args.source_path, False, args.eval, custom_aud=custom_aud)
+        # dataset_type = "ER-NeRF"
+        scene_info = sceneLoadTypeCallbacks2["ER-NeRF_Batch"](args.source_path, False, args.eval, custom_aud=custom_aud)
+        dataset_type = "ER-NeRF_Batch"
         
         self.maxtime = scene_info.maxtime
         self.dataset_type = dataset_type
@@ -57,7 +59,7 @@ class Scene:
         print("Loading Training Cameras")
         self.train_camera = FourDGSdataset(scene_info.train_cameras, args, dataset_type)
         print("Loading Test Cameras")
-        self.test_camera = FourDGSdataset(scene_info.test_cameras, args, dataset_type)
+        self.test_camera = FourDGSdataset_test(scene_info.test_cameras, args, dataset_type)
         print("Loading Video Cameras")
         self.video_camera = FourDGSdataset(scene_info.video_cameras, args, dataset_type)
         if custom_aud:
@@ -74,11 +76,11 @@ class Scene:
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
+                                                           "coarse_iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
             self.gaussians.load_model(os.path.join(self.model_path,
                                                     "point_cloud",
-                                                    "iteration_" + str(self.loaded_iter),
+                                                    "coarse_iteration_" + str(self.loaded_iter),
                                                    ))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
