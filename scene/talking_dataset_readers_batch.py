@@ -290,9 +290,18 @@ def validate_dataset_structure(path):
 
     return valid_datasets
 
+import pickle
 
+def save_list_to_pickle(cam_infos, file_path):
+    with open(file_path, 'wb') as f:
+        pickle.dump(cam_infos, f)
+        
+def load_list_from_pickle(file_path):
+    with open(file_path, 'rb') as f:
+        cam_infos = pickle.load(f)
+    return cam_infos
 
-def readTalkingPortraitDatasetInfo_batch(path, white_background, eval, extension=".jpg",custom_aud=None):
+def readTalkingPortraitDatasetInfo_batch(path, white_background, eval, extension=".jpg",custom_aud=None, fast_load=False):
     # Audio Information
     # aud_features = load_audio_features(path)    
     # eye_features = load_eye_features(path)
@@ -300,9 +309,19 @@ def readTalkingPortraitDatasetInfo_batch(path, white_background, eval, extension
     ply_path = os.path.join(path, "fused.ply")
     mesh_path = os.path.join(path, "track_params.pt")
     
-    
-    print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_train.json", extension, preload = False, short_load = True)
+
+    if fast_load:
+        if os.path.exists(os.path.join(path, "cam_infos.pkl")):
+            train_cam_infos = load_list_from_pickle(os.path.join(path, "cam_infos.pkl"))
+            print("Reading from pickle")
+           
+        else:
+            print("Reading Training Transforms")
+            train_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_train.json", extension, preload = False, short_load = False)
+            save_list_to_pickle(train_cam_infos, os.path.join(path, "cam_infos.pkl"))
+    else:
+        print("Reading Training Transforms")
+        train_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_train.json", extension, preload = False, short_load = True)
     print("Reading Test Transforms")
     test_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_val.json", extension, short_load = True)
     print("Generating Video Transforms")
@@ -354,117 +373,119 @@ def readCamerasFromTracksTransforms_batch(path_origin, meshfile, transformsfile,
     cam_infos = []
     path_list = validate_dataset_structure(path_origin)
     for i, name in enumerate(tqdm(path_list, desc="Processing datasets")):
-        if short_load and i > 10:break
-        path = os.path.join(path_origin, name)
-        
-        eye_features = load_eye_features(path)    
-        aud_features = load_audio_features(path)
-        
-        mesh_path = os.path.join(path, meshfile)
-        track_params = torch.load(mesh_path)
-        trans_infos = torch.load(mesh_path)["trans"]
-        
-        with open(os.path.join(path, transformsfile)) as json_file:
-            contents = json.load(json_file)
+        try:
+            if short_load and i > 10:break
+            path = os.path.join(path_origin, name)
             
-        contents["fl_x"] = contents["focal_len"]
-        contents["fl_y"] = contents["focal_len"]
-        contents["w"] = contents["cx"] * 2
-        contents["h"] = contents["cy"] * 2
+            eye_features = load_eye_features(path)    
+            aud_features = load_audio_features(path)
+            
+            mesh_path = os.path.join(path, meshfile)
+            track_params = torch.load(mesh_path)
+            trans_infos = torch.load(mesh_path)["trans"]
+            
+            with open(os.path.join(path, transformsfile)) as json_file:
+                contents = json.load(json_file)
+                
+            contents["fl_x"] = contents["focal_len"]
+            contents["fl_y"] = contents["focal_len"]
+            contents["w"] = contents["cx"] * 2
+            contents["h"] = contents["cy"] * 2
 
-        fovx = focal2fov(contents['fl_x'],contents['w'])
-        fovy = focal2fov(contents['fl_y'],contents['h'])
-        frames = contents["frames"]
-        f_path = os.path.join(path, "ori_imgs")
-        
-        FovY = fovy 
-        FovX = fovx
-        bg_image_path = os.path.join(path, "bc.jpg")
-        if custom_aud:
-            auds = aud_features
-        else:    
-            auds = [aud_features[min(frame['aud_id'], aud_features.shape[0] - 1)] for frame in frames]
-            auds = torch.stack(auds, dim=0)
+            fovx = focal2fov(contents['fl_x'],contents['w'])
+            fovy = focal2fov(contents['fl_y'],contents['h'])
+            frames = contents["frames"]
+            f_path = os.path.join(path, "ori_imgs")
             
-        for idx, frame in enumerate(frames): # len(frames): 7272
-            
-            cam_name = os.path.join(f_path, str(frame["img_id"]) + extension)
-            # aud_feature = get_audio_features(auds, att_mode = 2, index = idx)     
-            
-            # Camera Codes
-            euler = track_params["euler"][frame["img_id"]]
-            R = euler2rot(euler.unsqueeze(0))
-            
-            flip_rot = torch.tensor(
-                [[-1,  0,  0],  # This flips the X axis
-                [ 0,  1,  0],  # Y axis remains the same
-                [ 0,  0, 1]], # This flips the Z axis, maintaining the right-hand rule
-                dtype=R.dtype,
-                device=R.device
-            ).view(1, 3, 3)
-            # flip_rot = flip_rot.expand_as(R)  # Make sure it has the same batch size as R
+            FovY = fovy 
+            FovX = fovx
+            bg_image_path = os.path.join(path, "bc.jpg")
+            if custom_aud:
+                auds = aud_features
+            else:    
+                auds = [aud_features[min(frame['aud_id'], aud_features.shape[0] - 1)] for frame in frames]
+                auds = torch.stack(auds, dim=0)
+                
+            for idx, frame in enumerate(frames): # len(frames): 7272
+                
+                cam_name = os.path.join(f_path, str(frame["img_id"]) + extension)
+                # aud_feature = get_audio_features(auds, att_mode = 2, index = idx)     
+                
+                # Camera Codes
+                euler = track_params["euler"][frame["img_id"]]
+                R = euler2rot(euler.unsqueeze(0))
+                
+                flip_rot = torch.tensor(
+                    [[-1,  0,  0],  # This flips the X axis
+                    [ 0,  1,  0],  # Y axis remains the same
+                    [ 0,  0, 1]], # This flips the Z axis, maintaining the right-hand rule
+                    dtype=R.dtype,
+                    device=R.device
+                ).view(1, 3, 3)
+                # flip_rot = flip_rot.expand_as(R)  # Make sure it has the same batch size as R
 
-            # Apply the flip rotation by matrix multiplication
-            # Depending on your convention, you might need to apply the flip before or after the original rotation.
-            # Use torch.matmul(flip_rot, R) if the flip should be applied globally first,
-            # or torch.matmul(R, flip_rot) if the flip should be applied in the camera's local space.
-            R = torch.matmul(flip_rot, R)
-            R = R.squeeze(0).cpu().numpy()
-            T = track_params["trans"][frame["img_id"]].unsqueeze(0).cpu().numpy()
-            
-            R = -np.transpose(R)
-            T = -T
-            T[:, 0] = -T[:, 0] 
+                # Apply the flip rotation by matrix multiplication
+                # Depending on your convention, you might need to apply the flip before or after the original rotation.
+                # Use torch.matmul(flip_rot, R) if the flip should be applied globally first,
+                # or torch.matmul(R, flip_rot) if the flip should be applied in the camera's local space.
+                R = torch.matmul(flip_rot, R)
+                R = R.squeeze(0).cpu().numpy()
+                T = track_params["trans"][frame["img_id"]].unsqueeze(0).cpu().numpy()
+                
+                R = -np.transpose(R)
+                T = -T
+                T[:, 0] = -T[:, 0] 
 
-            # Get Iamges for Facial 
-            image_name = Path(cam_name).stem
+                # Get Iamges for Facial 
+                image_name = Path(cam_name).stem
 
-            full_image_path = cam_name
-            torso_image_path = os.path.join(path, 'torso_imgs', str(frame['img_id']) + '.png')
-            mask_path = cam_name.replace('ori_imgs', 'parsing').replace('.jpg', '.png')
-            
-            # Landmark and extract face
-            lms = np.loadtxt(os.path.join(path, 'ori_imgs', str(frame['img_id']) + '.lms')) # [68, 2]
+                full_image_path = cam_name
+                torso_image_path = os.path.join(path, 'torso_imgs', str(frame['img_id']) + '.png')
+                mask_path = cam_name.replace('ori_imgs', 'parsing').replace('.jpg', '.png')
+                
+                # Landmark and extract face
+                lms = np.loadtxt(os.path.join(path, 'ori_imgs', str(frame['img_id']) + '.lms')) # [68, 2]
 
-            lh_xmin, lh_xmax = int(lms[31:36, 1].min()), int(lms[:, 1].max()) # actually lower half area
-            xmin, xmax = int(lms[:, 1].min()), int(lms[:, 1].max())
-            ymin, ymax = int(lms[:, 0].min()), int(lms[:, 0].max())
-            face_rect = [xmin, xmax, ymin, ymax]
-            lhalf_rect = [lh_xmin, lh_xmax, ymin, ymax]
-            
-            # Eye Area and Eye Rect
-            eye_area = eye_features[frame['img_id']]
-            eye_area = np.clip(eye_area, 0, 2) / 2
-            
-            xmin, xmax = int(lms[36:48, 1].min()), int(lms[36:48, 1].max())
-            ymin, ymax = int(lms[36:48, 0].min()), int(lms[36:48, 0].max())
-            eye_rect = [xmin, xmax, ymin, ymax]
-            
-            # Finetune Lip Area
-            lips = slice(48, 60)
-            xmin, xmax = int(lms[lips, 1].min()), int(lms[lips, 1].max())
-            ymin, ymax = int(lms[lips, 0].min()), int(lms[lips, 0].max())
-            cx = (xmin + xmax) // 2
-            cy = (ymin + ymax) // 2
-            l = max(xmax - xmin, ymax - ymin) // 2
-            xmin = max(0, cx - l)
-            xmax = min(contents["h"], cx + l)
-            ymin = max(0, cy - l)
-            ymax = min(contents["w"], cy + l)
+                lh_xmin, lh_xmax = int(lms[31:36, 1].min()), int(lms[:, 1].max()) # actually lower half area
+                xmin, xmax = int(lms[:, 1].min()), int(lms[:, 1].max())
+                ymin, ymax = int(lms[:, 0].min()), int(lms[:, 0].max())
+                face_rect = [xmin, xmax, ymin, ymax]
+                lhalf_rect = [lh_xmin, lh_xmax, ymin, ymax]
+                
+                # Eye Area and Eye Rect
+                eye_area = eye_features[frame['img_id']]
+                eye_area = np.clip(eye_area, 0, 2) / 2
+                
+                xmin, xmax = int(lms[36:48, 1].min()), int(lms[36:48, 1].max())
+                ymin, ymax = int(lms[36:48, 0].min()), int(lms[36:48, 0].max())
+                eye_rect = [xmin, xmax, ymin, ymax]
+                
+                # Finetune Lip Area
+                lips = slice(48, 60)
+                xmin, xmax = int(lms[lips, 1].min()), int(lms[lips, 1].max())
+                ymin, ymax = int(lms[lips, 0].min()), int(lms[lips, 0].max())
+                cx = (xmin + xmax) // 2
+                cy = (ymin + ymax) // 2
+                l = max(xmax - xmin, ymax - ymin) // 2
+                xmin = max(0, cx - l)
+                xmax = min(contents["h"], cx + l)
+                ymin = max(0, cy - l)
+                ymax = min(contents["w"], cy + l)
 
-            lips_rect = [xmin, xmax, ymin, ymax]
-            
-            ori_image = None
-            torso_img = None
-            head_mask = None
-            seg = None
-            bg_img = None
-            
-            cam_infos.append(CameraInfo(path=path, uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, full_image=ori_image, full_image_path=full_image_path,
-                            image_name=image_name, width=contents["w"], height=contents["h"],
-                            torso_image=torso_img, torso_image_path=torso_image_path, bg_image=bg_img, bg_image_path=bg_image_path,
-                            mask=seg, mask_path=mask_path, trans=trans_infos[frame["img_id"]],
-                            face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=auds, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect))
+                lips_rect = [xmin, xmax, ymin, ymax]
+                
+                ori_image = None
+                torso_img = None
+                head_mask = None
+                seg = None
+                bg_img = None
+                
+                cam_infos.append(CameraInfo(path=path, uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, full_image=ori_image, full_image_path=full_image_path,
+                                image_name=image_name, width=contents["w"], height=contents["h"],
+                                torso_image=torso_img, torso_image_path=torso_image_path, bg_image=bg_img, bg_image_path=bg_image_path,
+                                mask=seg, mask_path=mask_path, trans=trans_infos[frame["img_id"]],
+                                face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=auds, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect))
+        except:pass
     return cam_infos     
 
 

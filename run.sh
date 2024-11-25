@@ -10,13 +10,14 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 #     --vae_pretrained /media/dataset2/joungbin/animate_anyone/pretrained_weights/sd-vae-ft-mse \
 
 
-CUDA_VISIBLE_DEVICES=0,2,3 accelerate launch \
-    --num_processes 3 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+    --num_processes 4 \
     train_vae.py \
     -s /media/dataset1/HDTF/data \
-    --model_path /media/dataset2/joungbin/GaussianTalker/output/vae/train_vae \
+    --model_path /media/dataset2/joungbin/GaussianTalker/output/vae/train_vae_10_identity \
     --configs arguments/64_dim_1_transformer.py \
     --use_wandb \
-    --expname train_vae_64_dim_1_transformer \
+    --expname train_vae_10_identity \
     --vae_pretrained /media/dataset2/joungbin/animate_anyone/pretrained_weights/sd-vae-ft-mse \
-    --start_checkpoint 3000 \
+    
+    # --start_checkpoint 21000 \

@@ -48,10 +48,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                          gaussians, scene, stage, tb_writer, train_iter,timer, use_wandb=False, vgg_perceptual_loss = None, accelerator = None):
     first_iter = 0
     gaussians.training_setup(opt)
-    # if checkpoint:
+    if checkpoint:
+        first_iter = int(checkpoint)
     #     (model_params, first_iter) = torch.load(checkpoint)
     #     gaussians.restore(model_params, opt)
-
 
     if stage == "fine" and first_iter == 0:
         gaussians.mlp2cpu()
@@ -158,14 +158,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
         radii=output["radii"]
         viewspace_point_tensor_list=output["viewspace_point_tensor_list"] 
         viewspace_point_tensor = viewspace_point_tensor_list[0]
-        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:]) * 0.8
+        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
 
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
-        perceptual_loss = vgg_perceptual_loss(image_tensor, gt_image_tensor[:,:3,:,:]) * 0.01
+        perceptual_loss = vgg_perceptual_loss(image_tensor, gt_image_tensor[:,:3,:,:]) * 0.02
     
         ssim_loss = 0.2 * (1.0 - ssim(image_tensor,gt_image_tensor))
         
-        posterior_loss = output["posterior"].kl().mean() * 0.0005
+        posterior_loss = output["posterior"].kl().mean() * 0.00001
         
         loss = Ll1 + perceptual_loss + ssim_loss + posterior_loss
         
@@ -174,7 +174,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             loss+=lip_l1_loss
         if opt.depth_fine_tuning:
             generated_mask = torch.sigmoid(output["depth_tensor"])*2-1
-            depth_loss = l1_loss(output["gt_masks_tensor"],generated_mask)*0.4
+            depth_loss = l1_loss(output["gt_masks_tensor"],generated_mask)*0.2
             loss += depth_loss
         
         # loss.backward()
@@ -282,7 +282,7 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     if use_wandb and accelerator.is_main_process:
-        wandb.init(project="TalkingGaussians", name=expname)
+        wandb.init(project="TalkingGaussians", name=expname, resume=True)
     
     if args.start_checkpoint!= None:
         vae_pretrained = os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint,"sd-vae-ft-mse")
