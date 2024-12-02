@@ -271,6 +271,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+                accelerator.wait_for_everyone()
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -282,7 +283,7 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     if use_wandb and accelerator.is_main_process:
-        wandb.init(project="TalkingGaussians", name=expname, resume=True)
+        wandb.init(project="TalkingGaussians", name=expname)
     
     if args.start_checkpoint!= None:
         vae_pretrained = os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint,"sd-vae-ft-mse")

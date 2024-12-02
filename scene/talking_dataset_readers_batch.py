@@ -374,7 +374,7 @@ def readCamerasFromTracksTransforms_batch(path_origin, meshfile, transformsfile,
     path_list = validate_dataset_structure(path_origin)
     for i, name in enumerate(tqdm(path_list, desc="Processing datasets")):
         try:
-            if short_load and i > 10:break
+            if short_load and i > 0:break
             path = os.path.join(path_origin, name)
             
             eye_features = load_eye_features(path)    

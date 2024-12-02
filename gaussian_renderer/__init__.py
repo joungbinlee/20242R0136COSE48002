@@ -310,6 +310,7 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
     gt_masks = []
     gt_w_bg = []
     cam_features = []
+    projmatrixs = []
     
     for viewpoint_camera in viewpoint_cameras:
         screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
@@ -366,15 +367,27 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         lips_list.append(viewpoint_camera.lips_rect)
         bg_mask = bg_mask.to(torch.float).unsqueeze(0).unsqueeze(0)
         gt_masks.append(bg_mask)
+        projmatrixs.append(viewpoint_camera.full_proj_transform.unsqueeze(dim=0))
         
     gt_tensor = torch.cat(gt_imgs,0)
     posterior = vae.module.encode(gt_tensor*2-1).latent_dist
     z = posterior.sample()
+    projmatrixs = torch.cat(projmatrixs,0).to(device=means3D.device)
+    
+    ones = torch.ones(means3D.shape[0], means3D.shape[1], 1, device=means3D.device)  # Shape: [4, 34650, 1]
+    means3D_h = torch.cat([means3D, ones], dim=-1)  # Shape: [4, 34650, 4]
+    projmatrixs = projmatrixs.unsqueeze(1)  # Shape: [4, 1, 4, 4]
+    transformed_h = torch.matmul(means3D_h.unsqueeze(-2), projmatrixs).squeeze(-2)  # Shape: [4, 34650, 4]
+    ndc_coordinates = transformed_h[..., :3] / transformed_h[..., 3:4]  # Shape: [4, 34650, 3]
+    ndc_coordinates[:,:,1:] = -ndc_coordinates[:,:,1:]
+    # ndc_coordinates = ndc_coordinates.cuda()
+    # visualize_ndc_video(ndc_coordinates.detach(), batch_idx=0, point_sample=10000)
+    # visualize_ndc_with_gt(ndc_coordinates.detach(), gt_tensor.detach(), batch_idx=1, point_sample=10000)
 
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
         _, mu_temp, scales_temp, rotations_temp, opacity_temp, shs_temp = pc._deformation(
-            z, means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
+            z, ndc_coordinates, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
         if "mu" in canonical_tri_plane_factor_list:
             means3D_final = means3D + mu_temp
         else: 
@@ -461,7 +474,7 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
             min_val = colors_precomp.min()
             max_val = colors_precomp.max()
             colors_precomp = (colors_precomp - min_val) / (max_val - min_val)
-
+            
             audio_image, radii, depth = rasterizer(
                 means3D = means3D_final[idx],
                 means2D = means2Ds[idx],
@@ -566,3 +579,112 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         "gt_w_bg_tensor":gt_w_bg_tensor,
         "posterior":posterior,
         }
+
+
+
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import torch
+import imageio
+import os
+
+def visualize_ndc_video(ndc_coordinates, batch_idx=0, point_sample=1000, save_path="ndc_visualization.mp4", fps=5):
+    """
+    Visualize NDC coordinates for a given batch, with Y and Z swapped, saving frames as a video.
+    
+    Args:
+        ndc_coordinates (torch.Tensor): Tensor of shape [batch_size, num_points, 3].
+        batch_idx (int): Batch index to visualize.
+        point_sample (int): Number of points to sample for visualization.
+        save_path (str): Path to save the output video.
+        fps (int): Frames per second for the video.
+    """
+    # Select batch
+    ndc_points = ndc_coordinates[batch_idx].cpu().numpy()  # Shape: [num_points, 3]
+    
+    # Optionally sample points for visualization
+    if point_sample < ndc_points.shape[0]:
+        sampled_indices = torch.randperm(ndc_points.shape[0])[:point_sample]
+        ndc_points = ndc_points[sampled_indices]
+    
+    # Extract x, y, z with Y and Z swapped
+    x, z, y = ndc_points[:, 0], ndc_points[:, 1], ndc_points[:, 2]
+    
+    # Prepare temporary directory for frames
+    temp_dir = "temp_frames"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Create frames by rotating the plot
+    frame_paths = []
+    for angle in range(0, 360, 5):  # Rotate from 0 to 360 degrees in 5-degree steps
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        scatter = ax.scatter(x, y, z, c=z, cmap='viridis', marker='o', s=1)
+        
+        # Set axis labels (with swapped Y and Z)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Z (swapped)')
+        ax.set_zlabel('Y (swapped)')
+        ax.set_title(f'NDC Visualization (Batch {batch_idx}, Y and Z Swapped)')
+        fig.colorbar(scatter, ax=ax, label='Depth (Z)')
+        
+        # Rotate the view
+        ax.view_init(elev=30, azim=angle)
+        
+        # Save frame
+        frame_path = os.path.join(temp_dir, f"frame_{angle:03d}.png")
+        plt.savefig(frame_path)
+        frame_paths.append(frame_path)
+        plt.close(fig)
+    
+    # Create video from frames
+    with imageio.get_writer(save_path, fps=fps) as writer:
+        for frame_path in frame_paths:
+            writer.append_data(imageio.imread(frame_path))
+    
+    # Clean up temporary frames
+    for frame_path in frame_paths:
+        os.remove(frame_path)
+    os.rmdir(temp_dir)
+    
+    print(f"Video saved to {save_path}")
+
+
+
+
+def visualize_ndc_with_gt(ndc_coordinates, gt_tensor, batch_idx=0, point_sample=1000):
+    """
+    Visualize NDC points projected onto the XY plane with a GT image as background.
+    
+    Args:
+        ndc_coordinates (torch.Tensor): NDC coordinates of shape [batch_size, num_points, 3].
+        gt_tensor (torch.Tensor): Ground truth images of shape [batch_size, 3, H, W].
+        batch_idx (int): Batch index to visualize.
+        point_sample (int): Number of points to sample for visualization.
+    """
+    # Select batch
+    ndc_points = ndc_coordinates[batch_idx].cpu().numpy()  # Shape: [num_points, 3]
+    gt_image = gt_tensor[batch_idx].permute(1, 2, 0).cpu().numpy()  # Shape: [H, W, 3]
+    
+    # Optionally sample points for visualization
+    if point_sample < ndc_points.shape[0]:
+        sampled_indices = torch.randperm(ndc_points.shape[0])[:point_sample]
+        ndc_points = ndc_points[sampled_indices]
+    
+    # Project NDC points onto the XY plane
+    x, y = ndc_points[:, 0], ndc_points[:, 1]
+    
+    # Normalize XY points to match image dimensions
+    H, W, _ = gt_image.shape
+    x_normalized = ((x + 1) / 2 * W).clip(0, W - 1)  # Normalize to [0, W]
+    y_normalized = ((1 - (y + 1) / 2) * H).clip(0, H - 1)  # Normalize to [0, H]
+    
+    # Create plot
+    plt.figure(figsize=(10, 10))
+    plt.imshow(gt_image, origin='upper')  # Display GT image as background
+    plt.scatter(x_normalized, y_normalized, c='red', s=1, label='NDC Points')  # Overlay NDC points
+    plt.title(f'NDC Points on GT Image (Batch {batch_idx})')
+    plt.axis('off')
+    plt.legend()
+    # plt.show()
+    plt.savefig("ndc_with_gt.png")

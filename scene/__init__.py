@@ -22,6 +22,7 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from torch.utils.data import Dataset
 from scene.dataset_readers import add_points
 
+import numpy as np
 from torchvision.utils import save_image
 class Scene:
 
@@ -72,7 +73,9 @@ class Scene:
         if args.add_points:
             print("add points.")
             scene_info = scene_info._replace(point_cloud=add_points(scene_info.point_cloud, xyz_max=xyz_max, xyz_min=xyz_min))
-        self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+        # breakpoint()
+        # self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+        self.gaussians._deformation.deformation_net.set_aabb(np.array([1.0, 1.0, -0.99]),np.array([-1.0, -1.0, -1.0]))
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",

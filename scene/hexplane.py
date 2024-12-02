@@ -297,13 +297,14 @@ class HexPlaneField_Conv(nn.Module):
         """Computes and returns the densities."""
         B,_,_,_ = posterior.shape
         grids = self.conv_in(posterior)
-        pts = normalize_aabb(pts, self.aabb) # N, 3
-        pts = pts.reshape(-1, pts.shape[-1]) # 3, N
         features = []
         for idx in range(B):
+            pts_ = pts[idx]
+            pts_ = normalize_aabb(pts_, self.aabb) # N, 3
+            pts_ = pts_.reshape(-1, pts_.shape[-1]) # 3, N
             feature = interpolate_ms_features(
-                # pts, ms_grids=self.grids, 
-                pts, ms_grids=grids[idx], 
+                # pts_, ms_grids=self.grids, 
+                pts_, ms_grids=grids[idx], 
                 grid_dimensions=self.grid_config[0]["grid_dimensions"], 
                 concat_features=self.concat_features, num_levels=None) 
             if len(feature) < 1:
