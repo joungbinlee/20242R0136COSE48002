@@ -195,6 +195,93 @@ def lbs(
     return verts, J_transformed, A[:, 1]
 
 
+
+
+def lbs_T_matrix(
+    pose,
+    v_shaped,
+    lbs_weights,
+    posedirs = None,
+    J_regressor = None,
+    parents = None,
+    pose2rot=True,
+    dtype=torch.float32,
+):
+    """Performs Linear Blend Skinning with the given shape and pose parameters
+
+    Parameters
+    ----------
+    betas : torch.tensor BxNB
+        The tensor of shape parameters
+    pose : torch.tensor Bx(J + 1) * 3
+        The pose parameters in axis-angle format
+    v_template: torch.tensor BxVx3
+        The template mesh that will be deformed
+    shapedirs : torch.tensor 1xNB
+        The tensor of PCA shape displacements
+    posedirs : torch.tensor Px(V * 3)
+        The pose PCA coefficients
+    J_regressor : torch.tensor JxV
+        The regressor array that is used to calculate the joints from
+        the position of the vertices
+    parents: torch.tensor J
+        The array that describes the kinematic tree for the model
+    lbs_weights: torch.tensor N x V x (J + 1)
+        The linear blend skinning weights that represent how much the
+        rotation matrix of each part affects each vertex
+    pose2rot: bool, optional
+        Flag on whether to convert the input pose tensor to rotation
+        matrices. The default value is True. If False, then the pose tensor
+        should already contain rotation matrices and have a size of
+        Bx(J + 1)x9
+    dtype: torch.dtype, optional
+
+    Returns
+    -------
+    verts: torch.tensor BxVx3
+        The vertices of the mesh after applying the shape and pose
+        displacements.
+    joints: torch.tensor BxJx3
+        The joints of the model
+    """
+    
+    batch_size = pose.shape[0]
+    device = pose.device
+    # Get the joints
+    # NxJx3 array
+    # J_regressor.all() == 0, torch.Size([5, 5023])
+    # v_shaped -> vertex torch.Size([1, 5023, 3])
+    if parents == None:
+        parents = torch.tensor([-1,0,1,1,1]).to(device = device)
+    J = vertices2joints(J_regressor, v_shaped).repeat(batch_size,1,1)
+    
+    # 3. Add pose blend shapes
+    # N x J x 3 x 3
+    ident = torch.eye(3, dtype=dtype, device=device)
+    if pose2rot:
+        # rot_mats = batch_rodrigues(pose.view(-1, 3), dtype=dtype).view(
+        rot_mats = batch_rodrigues(
+            pose.view(-1, 3), dtype=dtype).view([batch_size, -1, 3, 3])
+
+        pose_feature = (rot_mats[:, 1:, :, :] - ident).view([batch_size, -1])
+        # (N x P) x (P, V * 3) -> N x V x 3
+        pose_offsets = torch.matmul(pose_feature, posedirs) \
+            .view(batch_size, -1, 3)
+    # 4. Get the global joint location
+    # parents = tensor([-1,  0,  1,  1,  1], device='cuda:0')
+    torch.mean(pose_offsets,dim=1)
+    J_transformed, A = batch_rigid_transform(rot_mats, J, parents, dtype=dtype)
+
+    # 5. Do skinning:
+    # W is N x V x (J + 1)
+    W = lbs_weights.unsqueeze(dim=0).expand([batch_size, -1, -1])
+    # (N x V x (J + 1)) x (N x (J + 1) x 16)
+    num_joints = J_regressor.shape[0]
+    T = torch.matmul(W, A.view(batch_size, num_joints, 16)).view(batch_size, -1, 4, 4)
+
+    return T
+
+
 def vertices2joints(J_regressor, vertices):
     """Calculates the 3D joint locations from the vertices
 

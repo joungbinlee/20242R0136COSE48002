@@ -36,7 +36,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, gt_image, head_mask, bg_image,
                  image_name, uid, trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", 
                  aud_f = None, eye_f = None, depth=None,
-                 face_rect = None, lhalf_rect = None, eye_rect = None, lips_rect = None, bg_w_torso = None):
+                 face_rect = None, lhalf_rect = None, eye_rect = None, lips_rect = None, bg_w_torso = None, T_matrix = None):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -65,18 +65,22 @@ class Camera(nn.Module):
         self.zfar = 100.0
         self.znear = 0.01
 
-        # self.trans = torch.tensor([trans[1],trans[2],0])
-        # self.scale = trans[0]
+    
+        # self.trans = trans
+        # self.scale = scale
+        self.trans = np.array([trans[1],trans[2]/trans[0],0]) 
+        self.scale = 1.0
         
-        self.trans = trans
-        self.scale = scale
-        # ForkedPdb().set_trace()
+        
         self.face_rect = face_rect
         self.lhalf_rect = lhalf_rect
         self.eye_rect = eye_rect
         self.lips_rect = lips_rect
-        
-        self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1)  #.cuda()
+
+        self.world_view_transform = torch.tensor(getWorld2View2(R, T, self.trans, self.scale)).transpose(0, 1)  #.cuda()
+        # self.camera_center = self.world_view_transform.inverse()[3, :3]
+        # T_matrix[:, 2] *= -1
+        self.world_view_transform = T_matrix.to(dtype=self.world_view_transform.dtype) @ self.world_view_transform  # 추가함.
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)  #.cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]

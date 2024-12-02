@@ -211,9 +211,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
             # Log and save
             timer.pause()
-            if iteration % 500 == 0 or iteration == 1:
+            if iteration % 30 == 0 or iteration == 1:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
+                scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor, gt_image_tensor*0.3+image_tensor*0.7]), viewpoint_cams[0].uid)
                 
             timer.start()
             # Densification

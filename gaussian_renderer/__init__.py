@@ -65,7 +65,8 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
         cam_features.append(torch.from_numpy(np.concatenate((viewpoint_camera.R.reshape(-1), viewpoint_camera.T.reshape(-1))).reshape(1,-1)).to(means3D.device))
         bg_w_torso_list.append(viewpoint_camera.bg_w_torso.cpu())
         
-        bg_image = viewpoint_camera.bg_w_torso.to('cuda')
+        # bg_image = viewpoint_camera.bg_w_torso.to('cuda')
+        bg_image = viewpoint_camera.bg_image.to('cuda')
         
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
         tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
@@ -76,14 +77,11 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
             tanfovx= tanfovx,
             tanfovy= tanfovy,
             bg=bg_image,
-            # bg=torch.ones_like(bg_image),
             scale_modifier=scaling_modifier,
-            # scale_modifier=viewpoint_camera.scale,
             viewmatrix=viewpoint_camera.world_view_transform.cuda(),
             projmatrix=viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=pc.active_sh_degree,
             campos=viewpoint_camera.camera_center.cuda(),
-            # campos=viewpoint_camera.trans.cuda(),
             prefiltered=False,
             debug=pipe.debug
         )
@@ -93,6 +91,7 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
         bg_mask = torch.from_numpy(bg_mask).to("cuda")
         gt_image = viewpoint_camera.original_image.cuda()
         gt_w_bg.append(gt_image.unsqueeze(0))
+        bg_image = viewpoint_camera.bg_w_torso.to('cuda')
         gt_image = gt_image * bg_mask + bg_image * (~ bg_mask)
         gt_imgs.append(gt_image.unsqueeze(0).cuda())
         lips_list.append(viewpoint_camera.lips_rect)

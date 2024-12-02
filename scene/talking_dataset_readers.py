@@ -36,6 +36,9 @@ from scene.utils import get_audio_features, load_shape_from_obj
 from decalib.utils.tensor_cropper import transform_points
 from decalib.utils.rotation_converter import batch_rodrigues
 from decalib.common import batch_rot_matrix_to_ht, batch_orth_proj_matrix
+from flame_model.lbs import lbs_T_matrix
+import torch.nn.functional as F
+
 
 try:
     from pytorch3d.io import load_obj
@@ -70,6 +73,7 @@ class CameraInfo(NamedTuple):
     eye_f: np.array
     eye_rect: list
     lips_rect: list
+    T_matrix: torch.FloatTensor
    
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -353,7 +357,7 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
 
 
 def readCamerasFromTracksTransforms_deca(path, meshfile, transformsfile, aud_features, eye_features, 
-                                    extension=".png", mapper = {}, preload=False, custom_aud =None):
+                                    extension=".png", mapper = {}, preload=False, custom_aud =None, flame_param = None):
     cam_infos = []
     
     with open(os.path.join(path, transformsfile)) as json_file:
@@ -368,7 +372,37 @@ def readCamerasFromTracksTransforms_deca(path, meshfile, transformsfile, aud_fea
     else:    
         auds = [aud_features[min(frame['timestep_index'], aud_features.shape[0] - 1)] for frame in frames]
         auds = torch.stack(auds, dim=0)    
-        
+    
+    # with open('/media/dataset2/joungbin/GaussianTalker/data/obama/deca_camera.pkl', 'rb') as file:
+    with open('/media/dataset2/joungbin/GaussianTalker/data/obama/deca_camera_frames.pkl', 'rb') as file:
+        code_dict = pickle.load(file)
+
+    # code_dict['pose'][:, [0,2]] *= -1
+    # rotation_matrices = batch_rodrigues(torch.from_numpy(code_dict['pose'][:, 0:3]))
+    # ht_canonical2world = batch_rot_matrix_to_ht(rotation_matrices)
+    # ht_world2camera = batch_orth_proj_matrix(torch.from_numpy(code_dict['cam']))
+    # world_mat = torch.matmul(ht_world2camera, ht_canonical2world)
+    # ht_canonical2world = batch_rot_matrix_to_ht(rotation_matrices)
+    # ht_world2camera = batch_orth_proj_matrix(code_dict['cam'])
+    # print(code_dict['pose'])
+    # breakpoint()
+    code_dict['cam'] = torch.tensor(code_dict['cam'])
+    ht_world2camera = batch_orth_proj_matrix(code_dict['cam'])
+    code_dict['pose'][:, 0:3] *= -1
+    code_dict['pose'] = torch.from_numpy(np.concatenate([code_dict['pose'][:,:3],np.zeros_like(code_dict['pose'][:,:3]),code_dict['pose'][:,3:]],axis=1))
+    code_dict['pose'] = F.pad(code_dict['pose'], (0, 6), "constant", 0).to(dtype=ht_world2camera.dtype)
+    
+    T_matrix = lbs_T_matrix(code_dict['pose'],flame_param['v_template'],flame_param['weights'], flame_param['posedirs'].to(dtype=ht_world2camera.dtype),
+                 J_regressor = flame_param['J_regressor'])
+    # T_matrix[:,0,0:2,3] += code_dict['cam'][:,1:] * np.expand_dims(code_dict['cam'][:, 0], axis=1)
+    
+    # world_mat = torch.matmul(ht_world2camera, T_matrix[:,0].to(dtype=ht_world2camera.dtype))
+    # world_mat =  T_matrix[:,0].to(dtype=ht_world2camera.dtype)
+    world_mat =  torch.mean(T_matrix,dim=1)
+    # breakpoint()
+    # world_mat[:,1,3] += code_dict['cam'][:,1] / code_dict['cam'][:,0]
+    # world_mat[:,0,3] += code_dict['cam'][:,0] / code_dict['cam'][:,0]
+    # breakpoint()
     bg_image_path = os.path.join(path, "bc.jpg")
     bg_img = cv2.imread(bg_image_path, cv2.IMREAD_UNCHANGED) # [H, W, 3]
     if bg_img.shape[0] != contents["h"] or bg_img.shape[1] != contents["w"]:
@@ -392,7 +426,13 @@ def readCamerasFromTracksTransforms_deca(path, meshfile, transformsfile, aud_fea
         w2c = np.linalg.inv(c2w)
         R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
         T = w2c[:3, 3]
-
+        
+        # R = R @ ht_canonical2world[frame['timestep_index'],:3,:3].numpy()
+        # rotation_matrices[frame['timestep_index']][:3, 0] *= -1
+        # R = R @ rotation_matrices[frame['timestep_index']].numpy()
+        # R_temp = T_matrix[frame['timestep_index'],0,:3,:3].numpy()
+        # R = R @ R_temp
+        
         image_path = os.path.join(path, cam_name)
         image_name = Path(cam_name).stem
         
@@ -475,8 +515,10 @@ def readCamerasFromTracksTransforms_deca(path, meshfile, transformsfile, aud_fea
         cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, full_image=ori_image, full_image_path=full_image_path,
                         image_name=image_name, width=contents["w"], height=contents["h"],
                         torso_image=torso_img, torso_image_path=torso_image_path, bg_image=bg_img, bg_image_path=bg_image_path,
-                        mask=seg, mask_path=mask_path, trans = np.array([0.0, 0.0, 0.0]), #trans=code_dict['cam'][frame["img_id"]], #trans=trans_infos[frame["img_id"]],
-                        face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=aud_feature, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect))
+                        mask=seg, mask_path=mask_path, trans=code_dict['cam'][frame["timestep_index"]],#trans = np.array([0.0, 0.0, 0.0]),  #trans=code_dict['cam'][frame["timestep_index"]], #trans=trans_infos[frame["img_id"]],
+                        face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=aud_feature, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect,
+                        T_matrix=world_mat[frame['timestep_index']] ))
+                        # T_matrix=T_matrix[frame['timestep_index'],0] ))
         # cam_infos.append(CameraInfo(
         #     uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, bg=bg, image=image, 
         #     image_path=image_path, image_name=image_name, 
@@ -697,6 +739,8 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
 
 
 def readTalkingPortraitDatasetInfo_deca(path, white_background, eval, extension=".jpg",custom_aud=None):
+    
+    
     # Audio Information
     aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
     aud_features = torch.from_numpy(aud_features)
@@ -715,17 +759,50 @@ def readTalkingPortraitDatasetInfo_deca(path, white_background, eval, extension=
     au_blink_info=pd.read_csv(os.path.join(path, 'au.csv'))
     eye_features = au_blink_info[' AU45_r'].values
     
-    
     ply_path = os.path.join(path, "fused.ply")
     mesh_path = os.path.join(path, "track_params.pt")
+    
+    
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        # num_pts = 2000
+        # print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        
+        # Initialize with Flame Vertices
+        # facial_mesh = torch.load(mesh_path)["vertices"]
+        
+        # flames = load_shape_from_obj(os.path.join(path, '0_detail.obj'))
+        # average_facial_mesh = torch.tensor(flames['vertices'])[:,:3]
+        
+        # 이게 진짜
+        with open('./flame_model/assets/flame/generic_model.pkl', 'rb') as file:
+            flame_param = pickle.load(file,encoding='latin1')
+        average_facial_mesh = torch.tensor(flame_param['v_template'])
+        flame_param['weights'] = torch.from_numpy(flame_param['weights'])
+        flame_param['J_regressor'] = torch.from_numpy(flame_param['J_regressor'].toarray())
+        flame_param['v_template'] = torch.from_numpy(flame_param['v_template']).unsqueeze(dim=0)
+        
+        num_pose_basis = flame_param['posedirs'].shape[-1]
+        posedirs = np.reshape(flame_param['posedirs'], [-1, num_pose_basis]).T
+        flame_param['posedirs'] = torch.tensor(posedirs)
+        
+        xyz = average_facial_mesh.cpu().numpy()
+        shs = np.random.random((xyz.shape[0], 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((xyz.shape[0], 3)))        
+        
+        
+    else:
+        raise NotImplementedError("No ply file found!")
     
     timestamp_mapper, max_time = read_timeline(path)
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTracksTransforms_deca(path, "track_params.pt", "transforms_train.json", 
-                                                      aud_features, eye_features, extension, timestamp_mapper, preload = False)
+                                                      aud_features, eye_features, extension, timestamp_mapper, preload = False, flame_param=flame_param)
     print("Reading Test Transforms")
     test_cam_infos = readCamerasFromTracksTransforms_deca(path, "track_params.pt", "transforms_test.json", 
-                                                     aud_features, eye_features, extension, timestamp_mapper)
+                                                     aud_features, eye_features, extension, timestamp_mapper, flame_param=flame_param)
     print("Generating Video Transforms")
     video_cam_infos = None 
 
@@ -747,34 +824,6 @@ def readTalkingPortraitDatasetInfo_deca(path, white_background, eval, extension=
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    if not os.path.exists(ply_path):
-        # Since this data set has no colmap data, we start with random points
-        # num_pts = 2000
-        # print(f"Generating random point cloud ({num_pts})...")
-
-        # We create random points inside the bounds of the synthetic Blender scenes
-        
-        # Initialize with Flame Vertices
-        # facial_mesh = torch.load(mesh_path)["vertices"]
-        
-        flames = load_shape_from_obj(os.path.join(path, '0_detail.obj'))
-        average_facial_mesh = torch.tensor(flames['vertices'])[:,:3]
-        
-        # flames = load_shape_from_obj('./flame_model/assets/flame/head_template_mesh.obj')
-        
-        
-        # verts, faces, aux = load_obj('./flame_model/assets/flame/head_template_mesh.obj', load_textures=False)
-        # average_facial_mesh = verts
-        # average_facial_mesh[:,1:] = -average_facial_mesh[:,1:]
-        
-        
-        xyz = average_facial_mesh.cpu().numpy()
-        shs = np.random.random((xyz.shape[0], 3)) / 255.0
-        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((xyz.shape[0], 3)))        
-        
-        
-    else:
-        raise NotImplementedError("No ply file found!")
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,

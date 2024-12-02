@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=3 \
     python train.py -s /media/dataset2/joungbin/VHAP/data/obama/obama_whiteBg_staticOffset_maskBelowLine \
     --model_path /media/dataset2/joungbin/GaussianTalker/output/Diff_gen/obama \
     --configs arguments/64_dim_1_transformer.py \

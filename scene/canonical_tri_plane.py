@@ -50,8 +50,10 @@ class canonical_tri_plane(nn.Module):
             if train_tri_plane == False:
                 feature = feature.detach()
             return feature
-        
-        feature = self.feature_out(feature)
+        try:
+            feature = self.feature_out(feature)
+        except:
+            breakpoint()
         scale = self.scales(feature)
         rotation = self.rotations(feature)
         opacity = self.opacity(feature)
