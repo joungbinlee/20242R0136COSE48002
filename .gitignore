@@ -10,6 +10,8 @@ data/
 data
 wandb/
 
+data_utils
+
 *.jpg
 *.mp4
 *.pth
@@ -18,3 +20,5 @@ wandb/
 
 render_orig.py
 
+
+*./tgz

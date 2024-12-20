@@ -305,7 +305,6 @@ def readTalkingPortraitDatasetInfo_batch(path, white_background, eval, extension
     # Audio Information
     # aud_features = load_audio_features(path)    
     # eye_features = load_eye_features(path)
-    
     ply_path = os.path.join(path, "fused.ply")
     mesh_path = os.path.join(path, "track_params.pt")
     
@@ -317,7 +316,7 @@ def readTalkingPortraitDatasetInfo_batch(path, white_background, eval, extension
            
         else:
             print("Reading Training Transforms")
-            train_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_train.json", extension, preload = False, short_load = False)
+            train_cam_infos = readCamerasFromTracksTransforms_batch(path, "track_params.pt", "transforms_train.json", extension, preload = False, short_load = True)
             save_list_to_pickle(train_cam_infos, os.path.join(path, "cam_infos.pkl"))
     else:
         print("Reading Training Transforms")
@@ -374,7 +373,7 @@ def readCamerasFromTracksTransforms_batch(path_origin, meshfile, transformsfile,
     path_list = validate_dataset_structure(path_origin)
     for i, name in enumerate(tqdm(path_list, desc="Processing datasets")):
         try:
-            if short_load and i > 0:break
+            if short_load and i > 2: break
             path = os.path.join(path_origin, name)
             
             eye_features = load_eye_features(path)    

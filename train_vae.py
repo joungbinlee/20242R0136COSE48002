@@ -168,6 +168,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
         posterior_loss = output["posterior"].kl().mean() * 0.00001
         
         loss = Ll1 + perceptual_loss + ssim_loss + posterior_loss
+        # loss = Ll1 + perceptual_loss + ssim_loss
         
         if opt.lip_fine_tuning:
             lip_l1_loss = l1_loss(output["rendered_lips_tensor"],output["gt_lips_tensor"])*0.4
@@ -231,7 +232,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, sav
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
                 vae_path = os.path.join(scene.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
-                vae.module.save_pretrained(os.path.join(vae_path,'sd-vae-ft-mse'), safe_serialization=False)
+                # vae.module.save_pretrained(os.path.join(vae_path,'sd-vae-ft-mse'), safe_serialization=False)
+                vae.save_pretrained(os.path.join(vae_path,'sd-vae-ft-mse'), safe_serialization=False)
                 accelerator.save_state(vae_path)
                 
             timer.start()
@@ -287,7 +289,7 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     
     if args.start_checkpoint!= None:
         vae_pretrained = os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint,"sd-vae-ft-mse")
-    vae = AutoencoderKL.from_pretrained(vae_pretrained).to(dtype=torch.float32)
+    vae = AutoencoderKL.from_pretrained(vae_pretrained, local_files_only=True).to(dtype=torch.float32)
 
     if "vae" in opt.train_l:
         vae.requires_grad_(True)
@@ -303,12 +305,11 @@ def training(accelerator, dataset, hyper, opt, pipe, testing_iterations, saving_
     # train_l_temp=opt.train_l
     # opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
     print(opt.train_l)
-
     dataset, scene, gaussians, vae, vgg_perceptual_loss  = accelerator.prepare(dataset, scene, gaussians, vae, vgg_perceptual_loss)
     if args.start_checkpoint!= None:
         accelerator.load_state(os.path.join(args.model_path,"point_cloud","coarse_iteration_" + args.start_checkpoint))
 
-    
+    # print(torch.cuda.memory_summary(device=torch.device('cuda')))
     scene_reconstruction(dataset, opt, hyper, pipe, vae, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
                              gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb, vgg_perceptual_loss, accelerator)
@@ -426,7 +427,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--vae_pretrained", type=str, default = "", required=True)
-    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
@@ -435,6 +435,7 @@ if __name__ == "__main__":
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     print("Optimizing " + args.model_path)
+    torch.cuda.empty_cache()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)

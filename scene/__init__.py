@@ -50,7 +50,8 @@ class Scene:
 
         # scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](args.source_path, False, args.eval, custom_aud=custom_aud)
         # dataset_type = "ER-NeRF"
-        scene_info = sceneLoadTypeCallbacks2["ER-NeRF_Batch"](args.source_path, False, args.eval, custom_aud=custom_aud)
+        
+        scene_info = sceneLoadTypeCallbacks2["ER-NeRF_Batch"](args.source_path, False, args.eval, custom_aud=custom_aud, fast_load=False)
         dataset_type = "ER-NeRF_Batch"
         
         self.maxtime = scene_info.maxtime

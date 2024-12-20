@@ -370,7 +370,8 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         projmatrixs.append(viewpoint_camera.full_proj_transform.unsqueeze(dim=0))
         
     gt_tensor = torch.cat(gt_imgs,0)
-    posterior = vae.module.encode(gt_tensor*2-1).latent_dist
+    # posterior = vae.module.encode(gt_tensor*2-1).latent_dist
+    posterior = vae.encode(gt_tensor*2-1).latent_dist
     z = posterior.sample()
     projmatrixs = torch.cat(projmatrixs,0).to(device=means3D.device)
     
@@ -426,7 +427,8 @@ def vae_render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, vae, rand
         eye_features = torch.cat(eye_features,dim=0)
         cam_features = torch.cat(cam_features,dim=0)
 
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = pc._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features)
+        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = pc._deformation(
+            z, ndc_coordinates, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
                                                                                                     
         scales_final = pc.scaling_activation(scales_final)
         rotations_final = torch.nn.functional.normalize(rotations_final,dim=2) 

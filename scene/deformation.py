@@ -143,7 +143,7 @@ class Deformation(nn.Module):
   
         return hidden
     
-    def attention_query_audio_batch(self, rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features, cam_features):
+    def attention_query_audio_batch(self, posterior, rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features, cam_features):
         # audio_features [B, 8, 29, 16]) 
         B, _, _, _= audio_features.shape
         
@@ -154,8 +154,7 @@ class Deformation(nn.Module):
         
         else:
             # audio_features [B, 8, 29, 16]) 
-            enc_x = self.tri_plane(rays_pts_emb,only_feature = True, train_tri_plane = self.args.train_tri_plane)
-            
+            enc_x, mu, scale, rotation, opacity, sh = self.tri_plane(posterior, rays_pts_emb, only_feature = False, train_tri_plane = False)
         enc_a_list= []
         for i in range(B):
             enc_a = self.audio_net(audio_features[i])   # 8 32
@@ -172,7 +171,7 @@ class Deformation(nn.Module):
         
         enc_source = torch.cat([enc_a,enc_eye, enc_cam, self.null_vector.repeat(B,1,1)],dim = 1) # B, 3, dim
         x, attention = self.transformer(enc_x, enc_source)
-        return x, attention
+        return x, attention, mu, scale, rotation, opacity, sh
     
     def attention_query_audio(self, rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features):
         # audio_features [1, 8, 29, 16])
@@ -210,9 +209,9 @@ class Deformation(nn.Module):
         if audio_features is None:
             return self.forward_static(posterior, rays_pts_emb)
         elif len(rays_pts_emb.shape)==3:
-            return self.forward_dynamic_batch(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features, cam_features)
+            return self.forward_dynamic_batch(posterior,rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features, cam_features)
         elif len(rays_pts_emb.shape)==2:
-            return self.forward_dynamic(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features)
+            return self.forward_dynamic(posterior, rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, audio_features, eye_features)
 
     def forward_static(self, posterior, rays_pts_emb):
         grid_feature, mu, scale, rotation, opacity, sh = self.tri_plane(posterior, rays_pts_emb)
@@ -220,6 +219,7 @@ class Deformation(nn.Module):
         return rays_pts_emb, mu, scale, rotation, opacity, sh.reshape([sh.shape[0],sh.shape[1],16,3])
     
     def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, audio_features, eye_features):
+        breakpoint()
         hidden, attention = self.attention_query_audio(rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features)
         if self.args.static_mlp:
             mask = self.static_mlp(hidden)
@@ -271,8 +271,9 @@ class Deformation(nn.Module):
             
         return pts, scales, rotations, opacity, shs, attention
     
-    def forward_dynamic_batch(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, audio_features, eye_features, cam_features):
-        hidden, attention = self.attention_query_audio_batch(rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features, cam_features)
+    def forward_dynamic_batch(self, posterior, rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, audio_features, eye_features, cam_features):
+        hidden, attention, mu_, scale_, rotation_, opacity_, sh_ = self.attention_query_audio_batch(posterior, rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features, cam_features)
+
         B, _, _, _ = audio_features.shape
         if self.args.static_mlp:
             mask = self.static_mlp(hidden)
@@ -285,7 +286,7 @@ class Deformation(nn.Module):
         else:
             dx = self.pos_deform(hidden)
             pts = torch.zeros_like(rays_pts_emb[:,:,:3])
-            pts = rays_pts_emb[:B,:,:3]*mask + dx
+            pts = rays_pts_emb[:B,:,:3]*mask + dx + mu_
         if self.args.no_ds :
             
             scales = scales_emb[:,:,:3]
@@ -293,7 +294,7 @@ class Deformation(nn.Module):
             ds = self.scales_deform(hidden)
 
             scales = torch.zeros_like(scales_emb[:,:,:3])
-            scales = scales_emb[:B,:,:3]*mask + ds
+            scales = scales_emb[:B,:,:3]*mask + ds + scale_
             
         if self.args.no_dr :
             rotations = rotations_emb[:,:,:4]
@@ -304,7 +305,7 @@ class Deformation(nn.Module):
             if self.args.apply_rotation:
                 rotations = batch_quaternion_multiply(rotations_emb, dr)
             else:
-                rotations = rotations_emb[:B,:,:4] + dr
+                rotations = rotations_emb[:B,:,:4] + dr + rotation_
 
         if self.args.no_do :
             opacity = opacity_emb[:,:,:1] 
@@ -312,15 +313,15 @@ class Deformation(nn.Module):
             do = self.opacity_deform(hidden) 
           
             opacity = torch.zeros_like(opacity_emb[:,:,:1])
-            opacity = opacity_emb[:B,:,:1]*mask + do
+            opacity = opacity_emb[:B,:,:1]*mask + do + opacity_
         if self.args.no_dshs:
             shs = shs_emb
         else:
             dshs = self.shs_deform(hidden).reshape([shs_emb.shape[0],shs_emb.shape[1],16,3])
 
             shs = torch.zeros_like(shs_emb)
-            shs = shs_emb[:B]*mask.unsqueeze(-1) + dshs
-        
+            shs = shs_emb[:B]*mask.unsqueeze(-1) + dshs + sh_.reshape([shs_emb.shape[0],shs_emb.shape[1],16,3])
+
         return pts, scales, rotations, opacity, shs, attention
     
     def get_mlp_parameters(self):
@@ -386,7 +387,7 @@ class deform_network(nn.Module):
             scales_emb = self.scales_emb
             rotations_emb = self.rotations_emb
 
-            means3D, scales, rotations, opacity, shs, attention = self.deformation_net(point_emb,
+            means3D, scales, rotations, opacity, shs, attention = self.deformation_net(posterior, point_emb,
                                                     scales_emb,
                                                     rotations_emb,
                                                     opacity,
@@ -395,11 +396,10 @@ class deform_network(nn.Module):
             return means3D, scales, rotations, opacity, shs, attention
 
         else:
-            breakpoint()
             point_emb = poc_fre(point,self.pos_poc)         # B, N, 3 -> B, N, 63
             scales_emb = poc_fre(scales,self.rotation_scaling_poc)
             rotations_emb = poc_fre(rotations,self.rotation_scaling_poc)
-            means3D, scales, rotations, opacity, shs, attention = self.deformation_net(point_emb,
+            means3D, scales, rotations, opacity, shs, attention = self.deformation_net(posterior, point_emb,
                                                     scales_emb,
                                                     rotations_emb,
                                                     opacity,

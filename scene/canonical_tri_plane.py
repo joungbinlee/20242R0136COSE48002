@@ -50,21 +50,21 @@ class canonical_tri_plane(nn.Module):
     def forward(self, posterior, rays_pts_emb, only_feature = False, train_tri_plane=True):
         mu, scale, rotation, opacity, sh = None,None,None,None,None
         B,_,_ = rays_pts_emb.shape
-        feature = self.grid(posterior, rays_pts_emb[:,:,:3])
+        feature_ = self.grid(posterior, rays_pts_emb[:,:,:3])
         
         if only_feature:
             if train_tri_plane == False:
                 feature = feature.detach()
             return feature
         
-        feature = self.feature_out(feature)
+        feature = self.feature_out(feature_)
         mu = self.mu(feature)
         scale = self.scales(feature)
         rotation = self.rotations(feature)
         opacity = self.opacity(feature)
         sh = self.shs(feature)
         
-        return feature, mu, scale, rotation, opacity, sh
+        return feature_, mu, scale, rotation, opacity, sh
         
 
 
