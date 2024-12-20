@@ -23,14 +23,26 @@ pip install --upgrade "protobuf<=3.20.1"
 
 ## Data Preparation
 
-### 1. Prepare Face-Parsing Model
+
+### 1. Download Dataset
+We used talking portrait videos from [AD-NeRF](https://github.com/YudongGuo/AD-NeRF), [GeneFace](https://github.com/yerfor/GeneFace) and [HDTF dataset](https://github.com/MRzzm/HDTF). These are static videos whose average length are about 3~5 minutes.
+
+You can see an example video with the below line:
+
+```bash
+wget https://github.com/YudongGuo/AD-NeRF/blob/master/dataset/vids/Obama.mp4?raw=true -O data/obama/obama.mp4
+```
+
+We also used [SynObama](https://grail.cs.washington.edu/projects/AudioToObama/) for cross-driven setting inference.
+
+### 2. Prepare Face-Parsing Model
 Download the face-parsing model:
 
 ```bash
 wget https://github.com/YudongGuo/AD-NeRF/blob/master/data_util/face_parsing/79999_iter.pth?raw=true -O data_utils/face_parsing/79999_iter.pth
 ```
 
-### 2. Download 3DMM Model
+### 3. Download 3DMM Model
 Download the Basel Face Model 2009 from [Basel Face Model 2009](https://faces.dmi.unibas.ch/bfm/main.php?nav=1-1-0&id=details) and place `01_MorphableModel.mat` in the following directory:
 
 ```
@@ -46,7 +58,7 @@ cd ../../
 python data_utils/process.py ${YOUR_DATASET_DIR}/${DATASET_NAME}/${DATASET_NAME}.mp4
 ```
 
-### 3. Obtain AU45 for Eye Blinking
+### 4. Obtain AU45 for Eye Blinking
 Run `FeatureExtraction` in [OpenFace](https://github.com/TadasBaltrusaitis/OpenFace), rename and move the output CSV file to the following directory structure:
 
 ```
@@ -87,16 +99,6 @@ Run `FeatureExtraction` in [OpenFace](https://github.com/TadasBaltrusaitis/OpenF
 │       ├── transforms_val.json
 ```
 
-### 4. Download Dataset
-We used talking portrait videos from [AD-NeRF](https://github.com/YudongGuo/AD-NeRF), [GeneFace](https://github.com/yerfor/GeneFace) and [HDTF dataset](https://github.com/MRzzm/HDTF). These are static videos whose average length are about 3~5 minutes.
-
-You can see an example video with the below line:
-
-```bash
-wget https://github.com/YudongGuo/AD-NeRF/blob/master/dataset/vids/Obama.mp4?raw=true -O data/obama/obama.mp4
-```
-
-We also used [SynObama](https://grail.cs.washington.edu/projects/AudioToObama/) for cross-driven setting inference.
 
 ## Training
 
